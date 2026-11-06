@@ -315,8 +315,8 @@ struct ContentContext::Pipelines {
 
 void ContentContextOptions::ApplyToPipelineDescriptor(
     PipelineDescriptor& desc) const {
-  auto pipeline_blend = blend_mode;
-  if (blend_mode > Entity::kLastPipelineBlendMode) {
+  auto pipeline_blend = ResolvePipelineBlendMode();
+  if (pipeline_blend > Entity::kLastPipelineBlendMode) {
     VALIDATION_LOG << "Cannot use blend mode " << static_cast<int>(blend_mode)
                    << " as a pipeline blend.";
     pipeline_blend = BlendMode::kSrcOver;

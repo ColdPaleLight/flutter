@@ -2189,6 +2189,39 @@ TEST_P(EntityTest, ContentContextOptionsHasReasonableHashFunctions) {
   EXPECT_NE(hash_c, hash_d);
 }
 
+TEST(ContentContextOptionsTest, OpaqueSrcWithFragmentCoverageUsesSrcOverState) {
+  auto color_attachment = [](const ContentContextOptions& options) {
+    PipelineDescriptor descriptor;
+    descriptor.SetColorAttachmentDescriptor(0u, ColorAttachmentDescriptor{});
+    options.ApplyToPipelineDescriptor(descriptor);
+    return *descriptor.GetColorAttachmentDescriptor(0u);
+  };
+
+  ContentContextOptions src_over{
+      .blend_mode = BlendMode::kSrcOver,
+      .color_attachment_pixel_format = PixelFormat::kR8G8B8A8UNormInt,
+      .has_depth_stencil_attachments = false,
+  };
+  auto src = src_over;
+  src.blend_mode = BlendMode::kSrc;
+  const auto src_key = src.ToKey();
+  const auto src_attachment = color_attachment(src);
+
+  auto covered_src = src;
+  covered_src.has_fragment_coverage = true;
+  EXPECT_EQ(covered_src.ToKey(), src_key);
+  EXPECT_EQ(color_attachment(covered_src), src_attachment);
+
+  src.source_is_opaque = true;
+  EXPECT_EQ(src.ToKey(), src_key);
+  EXPECT_EQ(color_attachment(src), src_attachment);
+
+  covered_src.source_is_opaque = true;
+  EXPECT_NE(covered_src.ToKey(), src_key);
+  EXPECT_EQ(covered_src.ToKey(), src_over.ToKey());
+  EXPECT_EQ(color_attachment(covered_src), color_attachment(src_over));
+}
+
 #ifdef FML_OS_LINUX
 TEST_P(EntityTest, FramebufferFetchVulkanBindingOffsetIsTheSame) {
   // Using framebuffer fetch on Vulkan requires that we maintain a subpass input

@@ -30,9 +30,7 @@
 namespace impeller {
 /// Pipeline state configuration.
 ///
-/// Each unique combination of these options requires a different pipeline state
-/// object to be built. This struct is used as a key for the per-pipeline
-/// variant cache.
+/// The per-pipeline variant cache keys the resulting GPU state with ToKey().
 ///
 /// When adding fields to this key, reliant features should take care to limit
 /// the combinatorical explosion of variations. A sufficiently complicated
@@ -85,6 +83,11 @@ struct ContentContextOptions {
   bool depth_write_enabled = false;
   bool is_for_rrect_blur_clear = false;
 
+  // The shader folds independent scalar coverage into the premultiplied source.
+  bool has_fragment_coverage = false;
+  // Opacity of the source before the shader applies coverage.
+  bool source_is_opaque = false;
+
   constexpr uint64_t ToKey() const {
     static_assert(sizeof(sample_count) == 1);
     static_assert(sizeof(blend_mode) == 1);
@@ -103,11 +106,22 @@ struct ContentContextOptions {
            static_cast<uint64_t>(primitive_type) << 16 |
            static_cast<uint64_t>(stencil_mode) << 24 |
            static_cast<uint64_t>(depth_compare) << 32 |
-           static_cast<uint64_t>(blend_mode) << 40 |
+           static_cast<uint64_t>(ResolvePipelineBlendMode()) << 40 |
            static_cast<uint64_t>(sample_count) << 48;
   }
 
   void ApplyToPipelineDescriptor(PipelineDescriptor& desc) const;
+
+ private:
+  constexpr BlendMode ResolvePipelineBlendMode() const {
+    if (blend_mode == BlendMode::kSrc && has_fragment_coverage &&
+        source_is_opaque) {
+      // The fragment alpha is the coverage. SrcOver weights the destination
+      // by the uncovered fraction.
+      return BlendMode::kSrcOver;
+    }
+    return blend_mode;
+  }
 };
 
 enum ConicalKind {

@@ -4,6 +4,7 @@
 
 #include "impeller/display_list/dl_golden_unittests.h"
 
+#include <cstring>
 #include <memory>
 #include <utility>
 
@@ -419,6 +420,36 @@ std::optional<int32_t> CalculateSpaceBetweenUI(
   return boundaries[4] - boundaries[3];
 }
 }  // namespace
+
+TEST_P(DlGoldenTest, OpaqueSrcTextPreservesGlyphHole) {
+  SetWindowSize(impeller::ISize(128, 128));
+  auto render = [&](DlBlendMode blend_mode) {
+    DisplayListBuilder builder;
+    builder.DrawColor(DlColor::RGBA(0.2f, 0.6f, 0.8f, 0.7f), DlBlendMode::kSrc);
+    auto bounds = RenderTextInCanvasSkia(
+        &builder, "O", "Roboto-Regular.ttf", DlPoint(24, 90),
+        TextRenderOptions{.font_size = 72,
+                          .color = DlColor::kWhite(),
+                          .blend_mode = blend_mode});
+    EXPECT_TRUE(bounds.ok()) << bounds.status();
+    return MakeScreenshot(builder.Build());
+  };
+
+  auto reference = render(DlBlendMode::kSrcOver);
+  if (!reference) {
+    GTEST_SKIP() << "making screenshots not supported.";
+  }
+  auto result = render(DlBlendMode::kSrc);
+  ASSERT_TRUE(result);
+  EXPECT_LT(RMSE(reference.get(), result.get()), 0.1);
+
+  auto pixel_at = [&](size_t x, size_t y) {
+    return result->GetBytes() + y * result->GetBytesPerRow() + x * 4;
+  };
+  // Compare the hole and the top stroke to the background on the same row.
+  EXPECT_EQ(std::memcmp(pixel_at(48, 64), pixel_at(0, 64), 4), 0);
+  EXPECT_NE(std::memcmp(pixel_at(44, 38), pixel_at(0, 38), 4), 0);
+}
 
 TEST_P(DlGoldenTest, BaselineHE) {
   SetWindowSize(impeller::ISize(1024, 200));

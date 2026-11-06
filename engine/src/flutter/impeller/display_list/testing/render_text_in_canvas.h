@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "flutter/display_list/dl_blend_mode.h"
 #include "flutter/display_list/dl_canvas.h"
 #include "flutter/display_list/dl_color.h"
 #include "flutter/display_list/effects/dl_mask_filter.h"
@@ -22,6 +23,7 @@ struct TextRenderOptions {
   DlColor color = DlColor::kYellow();
   std::shared_ptr<DlMaskFilter> mask_filter;
   bool is_subpixel = false;
+  DlBlendMode blend_mode = DlBlendMode::kSrcOver;
 };
 
 absl::StatusOr<DlRect> RenderTextInCanvasSkia(

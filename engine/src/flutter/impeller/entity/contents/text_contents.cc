@@ -274,6 +274,10 @@ bool TextContents::Render(const ContentContext& renderer,
   pass.SetCommandLabel("TextFrame");
   auto opts = OptionsFromPassAndEntity(pass, entity);
   opts.primitive_type = PrimitiveType::kTriangle;
+  if (type == GlyphAtlas::Type::kAlphaBitmap) {
+    opts.has_fragment_coverage = true;
+    opts.source_is_opaque = color.IsOpaque();
+  }
   pass.SetPipeline(renderer.GetGlyphAtlasPipeline(opts));
 
   // Common vertex uniforms for all glyphs.

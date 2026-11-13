@@ -36,6 +36,8 @@ absl::StatusOr<DlRect> RenderTextInCanvasSkia(
 
   DlPaint text_paint;
   text_paint.setColor(options.color);
+  text_paint.setBlendMode(options.blend_mode);
+  text_paint.setColorFilter(options.color_filter);
   text_paint.setMaskFilter(options.mask_filter);
   // text_paint.mask_blur_descriptor = options.mask_blur_descriptor;
   // text_paint.stroke_width = 1;

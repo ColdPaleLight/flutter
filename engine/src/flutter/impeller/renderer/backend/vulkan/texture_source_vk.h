@@ -23,6 +23,9 @@ namespace impeller {
 struct FramebufferAndRenderPass {
   SharedHandleVK<vk::Framebuffer> framebuffer = nullptr;
   SharedHandleVK<vk::RenderPass> render_pass = nullptr;
+  LoadAction color_load_action = LoadAction::kDontCare;
+  StoreAction color_store_action = StoreAction::kDontCare;
+  vk::ImageLayout color_initial_layout = vk::ImageLayout::eUndefined;
 };
 
 //------------------------------------------------------------------------------
@@ -154,9 +157,9 @@ class TextureSourceVK {
   /// `(sample_count, mip_level, slice)` subresource of this texture.
   ///
   /// This is only called when this texture is being used as the resolve (or
-  /// non-MSAA color) target of a render pass. By construction, the cached
-  /// objects are compatible with any future render pass that targets the
-  /// same subresource.
+  /// non-MSAA color) target of a render pass. The framebuffer can be reused
+  /// with compatible passes that use the same attachments. The load/store
+  /// actions and initial layout describe the cached render pass.
   void SetCachedFrameData(const FramebufferAndRenderPass& data,
                           SampleCount sample_count,
                           uint32_t mip_level = 0u,

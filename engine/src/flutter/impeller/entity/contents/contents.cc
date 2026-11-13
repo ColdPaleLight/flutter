@@ -49,6 +49,17 @@ Contents::Contents() = default;
 
 Contents::~Contents() = default;
 
+std::optional<BlendSourceAlpha> Contents::GetCoverageSourceAlpha() const {
+  return std::nullopt;
+}
+
+bool Contents::RenderWithCoverageBlend(const ContentContext&,
+                                       const Entity&,
+                                       RenderPass&,
+                                       const CoverageBlend&) const {
+  FML_UNREACHABLE();
+}
+
 bool Contents::IsOpaque(const Matrix& transform) const {
   return false;
 }

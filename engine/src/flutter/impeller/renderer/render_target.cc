@@ -321,7 +321,8 @@ RenderTargetConfig RenderTarget::ToConfig() const {
       .size = color_attachment.texture->GetSize(),
       .mip_count = color_attachment.texture->GetMipCount(),
       .has_msaa = color_attachment.resolve_texture != nullptr,
-      .has_depth_stencil = depth_.has_value() && stencil_.has_value()};
+      .has_depth_stencil = depth_.has_value() && stencil_.has_value(),
+      .color_format = GetRenderTargetPixelFormat()};
 }
 
 RenderTargetAllocator::RenderTargetAllocator(
@@ -424,6 +425,7 @@ RenderTarget RenderTargetAllocator::CreateOffscreenMSAA(
     if (context.GetCapabilities()->SupportsImplicitResolvingMSAA()) {
       // See below ("SupportsImplicitResolvingMSAA") for more details.
       color0_tex_desc.storage_mode = StorageMode::kDevicePrivate;
+      color0_tex_desc.usage |= TextureUsage::kShaderRead;
     }
     color0_msaa_tex = allocator_->CreateTexture(color0_tex_desc);
     if (!color0_msaa_tex) {

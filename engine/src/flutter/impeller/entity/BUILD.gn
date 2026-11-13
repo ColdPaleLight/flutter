@@ -18,12 +18,18 @@ impeller_shaders("entity_shaders") {
     "shaders/blending/advanced_blend.frag",
     "shaders/circle.frag",
     "shaders/circle.vert",
+    "shaders/circle_backdrop.frag",
+    "shaders/circle_dual.frag",
     "shaders/complex_rse.frag",
     "shaders/uber_sdf.frag",
+    "shaders/uber_sdf_backdrop.frag",
+    "shaders/uber_sdf_dual.frag",
     "shaders/clip.frag",
     "shaders/clip.vert",
     "shaders/glyph_atlas.frag",
     "shaders/glyph_atlas.vert",
+    "shaders/glyph_atlas_backdrop.frag",
+    "shaders/glyph_atlas_dual.frag",
     "shaders/gradients/gradient_fill.vert",
     "shaders/gradients/conical_gradient_fill_conical.frag",
     "shaders/gradients/conical_gradient_fill_strip.frag",
@@ -111,6 +117,9 @@ impeller_shaders("framebuffer_blend_entity_shaders") {
   shaders = [
     "shaders/blending/framebuffer_blend.vert",
     "shaders/blending/framebuffer_blend.frag",
+    "shaders/circle_fetch.frag",
+    "shaders/glyph_atlas_fetch.frag",
+    "shaders/uber_sdf_fetch.frag",
   ]
 }
 
@@ -120,6 +129,8 @@ impeller_component("entity") {
     "contents/anonymous_contents.h",
     "contents/atlas_contents.cc",
     "contents/atlas_contents.h",
+    "contents/blend_plan.cc",
+    "contents/blend_plan.h",
     "contents/circle_contents.cc",
     "contents/circle_contents.h",
     "contents/clip_contents.cc",
@@ -134,6 +145,8 @@ impeller_component("entity") {
     "contents/content_context.h",
     "contents/contents.cc",
     "contents/contents.h",
+    "contents/coverage_blend.cc",
+    "contents/coverage_blend.h",
     "contents/filters/blend_filter_contents.cc",
     "contents/filters/blend_filter_contents.h",
     "contents/filters/color_filter_contents.cc",
@@ -263,6 +276,7 @@ impeller_component("entity") {
     "../typographer",
     "//flutter/display_list",
     "//third_party/abseil-cpp/absl/container:flat_hash_map",
+    "//third_party/abseil-cpp/absl/functional:function_ref",
     "//third_party/abseil-cpp/absl/hash",
   ]
 

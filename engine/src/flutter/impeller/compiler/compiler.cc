@@ -4,6 +4,7 @@
 
 #include "impeller/compiler/compiler.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -210,6 +211,48 @@ static CompilerBackend CreateVulkanCompiler(
   return CompilerBackend(gl_compiler);
 }
 
+static void ConfigureDualSourceOutputs(spirv_cross::CompilerGLSL& compiler,
+                                       uint32_t version) {
+  const auto outputs = compiler.get_shader_resources().stage_outputs;
+  const auto index = [&](const auto& output) {
+    return compiler.get_decoration(output.id, spv::DecorationIndex);
+  };
+  if (std::none_of(outputs.begin(), outputs.end(),
+                   [&](const auto& output) { return index(output) == 1; })) {
+    return;
+  }
+  compiler.require_extension("GL_EXT_blend_func_extended");
+  if (version >= 300) {
+    return;  // SPIRV-Cross emits explicit location and index qualifiers.
+  }
+  // ESSL 100 has no user-defined outputs. The default SPIRV-Cross mapping
+  // maps both indices to gl_FragData[location], losing the primary color.
+  const bool multiple_targets =
+      std::any_of(outputs.begin(), outputs.end(), [&](const auto& output) {
+        return compiler.get_decoration(output.id, spv::DecorationLocation) != 0;
+      });
+  if (multiple_targets) {
+    compiler.require_extension("GL_EXT_draw_buffers");
+  }
+  for (const auto& output : outputs) {
+    const bool secondary = index(output) == 1;
+    std::string builtin;
+    if (multiple_targets) {
+      builtin = secondary ? "gl_SecondaryFragDataEXT" : "gl_FragData";
+      builtin += "[" +
+                 std::to_string(compiler.get_decoration(
+                     output.id, spv::DecorationLocation)) +
+                 "]";
+    } else {
+      builtin = secondary ? "gl_SecondaryFragColorEXT" : "gl_FragColor";
+    }
+    auto name = "impeller_blend_output_" + std::to_string(output.id);
+    compiler.set_name(output.id, name);
+    compiler.set_remapped_variable_state(output.id, true);
+    compiler.add_header_line("#define " + name + " " + builtin);
+  }
+}
+
 static CompilerBackend CreateGLSLCompiler(const spirv_cross::ParsedIR& ir,
                                           const SourceOptions& source_options) {
   std::shared_ptr<spirv_cross::CompilerGLSL> gl_compiler =
@@ -256,6 +299,9 @@ static CompilerBackend CreateGLSLCompiler(const spirv_cross::ParsedIR& ir,
       sl_options.version = 300;
     }
     sl_options.es = true;
+    if (source_options.type == SourceType::kFragmentShader) {
+      ConfigureDualSourceOutputs(*gl_compiler, sl_options.version);
+    }
     if (source_options.require_framebuffer_fetch &&
         source_options.type == SourceType::kFragmentShader) {
       gl_compiler->remap_ext_framebuffer_fetch(0, 0, true);

@@ -177,6 +177,18 @@ std::string FieldValue(const ContentContextOptions& options,
     case kFieldMsaa:
       return SampleCountToString(options.sample_count);
     case kFieldBlend:
+      if (options.blend_state) {
+        const auto& state = *options.blend_state;
+        return absl::StrCat(BlendModeToString(options.blend_mode), "[",
+                            state.blending_enabled, ",",
+                            static_cast<int>(state.src_color_blend_factor), ",",
+                            static_cast<int>(state.dst_color_blend_factor), ",",
+                            static_cast<int>(state.color_blend_op), ",",
+                            static_cast<int>(state.src_alpha_blend_factor), ",",
+                            static_cast<int>(state.dst_alpha_blend_factor), ",",
+                            static_cast<int>(state.alpha_blend_op), ",",
+                            static_cast<uint64_t>(state.write_mask), "]");
+      }
       return BlendModeToString(options.blend_mode);
     case kFieldDepth:
       return CompareFunctionToString(options.depth_compare);
@@ -539,11 +551,9 @@ class PipelineVariantRecorder::ReportPrinter {
   /// Only used on entries created by a `ContentContext`, which have options.
   static bool Before(const Entry* a, const Entry* b) {
     FML_DCHECK(a->options.has_value() && b->options.has_value());
-    const uint64_t a_key = a->options.has_value() ? a->options->ToKey() : 0u;
-    const uint64_t b_key = b->options.has_value() ? b->options->ToKey() : 0u;
-    return std::make_tuple(a_key, std::cref(a->label),
+    return std::make_tuple(FormatOptions(*a->options), std::cref(a->label),
                            std::cref(a->specialization_constants)) <
-           std::make_tuple(b_key, std::cref(b->label),
+           std::make_tuple(FormatOptions(*b->options), std::cref(b->label),
                            std::cref(b->specialization_constants));
   }
 

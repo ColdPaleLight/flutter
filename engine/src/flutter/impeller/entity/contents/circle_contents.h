@@ -12,6 +12,8 @@
 #include "impeller/entity/geometry/circle_geometry.h"
 
 namespace impeller {
+struct BlendBackdrop;
+
 class CircleContents : public ColorSourceContents {
  public:
   static std::unique_ptr<CircleContents>
@@ -21,11 +23,24 @@ class CircleContents : public ColorSourceContents {
               const Entity& entity,
               RenderPass& pass) const override;
 
+  std::optional<BlendSourceAlpha> GetCoverageSourceAlpha() const override;
+
+  bool RenderWithCoverageBlend(const ContentContext& renderer,
+                               const Entity& entity,
+                               RenderPass& pass,
+                               const CoverageBlend& blend) const override;
+
   std::optional<Rect> GetCoverage(const Entity& entity) const override;
 
   const Geometry* GetGeometry() const override;
 
  private:
+  bool RenderCircle(const ContentContext& renderer,
+                    const Entity& entity,
+                    RenderPass& pass,
+                    const BlendPlan* plan,
+                    const BlendBackdrop* backdrop) const;
+
   explicit CircleContents(std::unique_ptr<CircleGeometry> geometry,
                           Color color,
                           bool stroked,

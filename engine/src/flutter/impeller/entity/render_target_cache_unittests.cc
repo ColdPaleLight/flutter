@@ -44,7 +44,10 @@ class TestAllocator : public Allocator {
     if (should_fail) {
       return nullptr;
     }
-    return std::make_shared<MockTexture>(desc);
+    auto texture = std::make_shared<::testing::NiceMock<MockTexture>>(desc);
+    ON_CALL(*texture, IsValid()).WillByDefault(::testing::Return(true));
+    ON_CALL(*texture, GetSize()).WillByDefault(::testing::Return(desc.size));
+    return texture;
   };
 
   bool should_fail = false;
@@ -143,6 +146,26 @@ TEST_P(RenderTargetCacheTest, CachedTextureGetsNewAttachmentConfig) {
   // but with attributes from the second AttachmentConfig.
   EXPECT_EQ(color2.texture, color1.texture);
   EXPECT_EQ(color2.clear_color, Color::Red());
+}
+
+TEST_P(RenderTargetCacheTest, KeepsColorFormatsSeparate) {
+  RenderTargetCache cache(std::make_shared<TestAllocator>(), 1u);
+  for (bool msaa : {false, true}) {
+    for (PixelFormat format :
+         {PixelFormat::kR8G8B8A8UNormInt, PixelFormat::kB8G8R8A8UNormInt}) {
+      cache.Start();
+      auto target = msaa ? cache.CreateOffscreenMSAA(
+                               *GetContext(), {32, 32}, 1, "Test",
+                               RenderTarget::kDefaultColorAttachmentConfigMSAA,
+                               std::nullopt, nullptr, nullptr, nullptr, format)
+                         : cache.CreateOffscreen(
+                               *GetContext(), {32, 32}, 1, "Test",
+                               RenderTarget::kDefaultColorAttachmentConfig,
+                               std::nullopt, nullptr, nullptr, format);
+      EXPECT_EQ(target.GetRenderTargetPixelFormat(), format);
+      cache.End();
+    }
+  }
 }
 
 TEST_P(RenderTargetCacheTest, CreateWithEmptySize) {

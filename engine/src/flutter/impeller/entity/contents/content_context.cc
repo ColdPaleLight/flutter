@@ -13,6 +13,7 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/texture_descriptor.h"
+#include "impeller/entity/contents/blend_plan.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
 #include "impeller/entity/contents/pipeline_variant_recording.h"
 #include "impeller/entity/contents/pipelines.h"
@@ -37,15 +38,15 @@ namespace {
 class GenericVariants {
  public:
   void Set(const ContentContextOptions& options,
+           const ContentContextOptions::Key& pipeline_key,
            std::unique_ptr<GenericRenderPipelineHandle> pipeline) {
-    uint64_t p_key = options.ToKey();
     for (const auto& [key, pipeline] : pipelines_) {
-      if (key == p_key) {
+      if (key == pipeline_key) {
         return;
       }
     }
     IMPELLER_RECORD_PIPELINE_VARIANT(options, pipeline.get());
-    pipelines_.push_back(std::make_pair(p_key, std::move(pipeline)));
+    pipelines_.push_back(std::make_pair(pipeline_key, std::move(pipeline)));
   }
 
   /// Defaults are created ahead of time rather than on first use, so they are
@@ -53,40 +54,33 @@ class GenericVariants {
   void SetDefault(PipelineLibrary& pipeline_library,
                   const ContentContextOptions& options,
                   std::unique_ptr<GenericRenderPipelineHandle> pipeline) {
-    default_options_ = options;
+    default_key_ = options.ToKey();
     if (pipeline) {
-      if (std::optional<PipelineDescriptor> desc = pipeline->GetDescriptor()) {
-        pipeline_library.LogPipelineCreation(*desc);
+      desc_ = pipeline->GetDescriptor();
+      if (desc_) {
+        pipeline_library.LogPipelineCreation(*desc_);
       }
-      Set(options, std::move(pipeline));
+      Set(options, *default_key_, std::move(pipeline));
     }
   }
 
-  GenericRenderPipelineHandle* Get(const ContentContextOptions& options) const {
-    uint64_t p_key = options.ToKey();
+  GenericRenderPipelineHandle* Get(
+      const ContentContextOptions::Key& pipeline_key) const {
     for (const auto& [key, pipeline] : pipelines_) {
-      if (key == p_key) {
+      if (key == pipeline_key) {
         return pipeline.get();
       }
     }
     return nullptr;
   }
 
-  void SetDefaultDescriptor(std::optional<PipelineDescriptor> desc) {
-    desc_ = std::move(desc);
-  }
-
   size_t GetPipelineCount() const { return pipelines_.size(); }
-
-  bool IsDefault(const ContentContextOptions& opts) {
-    return default_options_.has_value() &&
-           opts.ToKey() == default_options_.value().ToKey();
-  }
 
  protected:
   std::optional<PipelineDescriptor> desc_;
-  std::optional<ContentContextOptions> default_options_;
-  std::vector<std::pair<uint64_t, std::unique_ptr<GenericRenderPipelineHandle>>>
+  std::optional<ContentContextOptions::Key> default_key_;
+  std::vector<std::pair<ContentContextOptions::Key,
+                        std::unique_ptr<GenericRenderPipelineHandle>>>
       pipelines_;
 };
 
@@ -116,8 +110,9 @@ class Variants : public GenericVariants {
   Variants() = default;
 
   void Set(const ContentContextOptions& options,
+           const ContentContextOptions::Key& pipeline_key,
            std::unique_ptr<PipelineHandleT> pipeline) {
-    GenericVariants::Set(options, std::move(pipeline));
+    GenericVariants::Set(options, pipeline_key, std::move(pipeline));
   }
 
   void SetDefault(PipelineLibrary& pipeline_library,
@@ -128,7 +123,8 @@ class Variants : public GenericVariants {
 
   void CreateDefault(const Context& context,
                      const ContentContextOptions& options,
-                     const std::vector<Scalar>& constants = {}) {
+                     const std::vector<Scalar>& constants = {},
+                     bool lazy = false) {
     std::optional<PipelineDescriptor> desc =
         PipelineHandleT::Builder::MakeDefaultPipelineDescriptor(context,
                                                                 constants);
@@ -137,28 +133,23 @@ class Variants : public GenericVariants {
       return;
     }
     options.ApplyToPipelineDescriptor(*desc);
-    desc_ = desc;
+    desc_ = std::move(desc);
     SetDefault(*context.GetPipelineLibrary(), options,
-               std::make_unique<PipelineHandleT>(context, desc_,
-                                                 /*async=*/true));
+               lazy ? nullptr
+                    : std::make_unique<PipelineHandleT>(context, desc_,
+                                                        /*async=*/true));
   }
 
-  PipelineHandleT* Get(const ContentContextOptions& options) const {
-    return static_cast<PipelineHandleT*>(GenericVariants::Get(options));
+  PipelineHandleT* Get(const ContentContextOptions::Key& key) const {
+    return static_cast<PipelineHandleT*>(GenericVariants::Get(key));
   }
 
-  PipelineHandleT* GetDefault(const Context& context) {
-    if (!default_options_.has_value()) {
-      return nullptr;
-    }
-    PipelineHandleT* result = Get(default_options_.value());
-    if (result != nullptr) {
-      return result;
-    }
-    Set(default_options_.value(),
-        std::make_unique<PipelineHandleT>(context, desc_, /*async=*/false));
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    return Get(default_options_.value());
+  const std::optional<PipelineDescriptor>& GetDefaultDescriptor() const {
+    return desc_;
+  }
+
+  bool IsDefault(const ContentContextOptions::Key& key) const {
+    return default_key_ == key;
   }
 
  private:
@@ -176,37 +167,27 @@ RenderPipelineHandleT* CreateIfNeeded(
     return nullptr;
   }
 
-  if (RenderPipelineHandleT* found = container.Get(opts)) {
+  const auto key = opts.ToKey();
+  if (RenderPipelineHandleT* found = container.Get(key)) {
     return found;
   }
 
   IMPELLER_PIPELINE_VARIANT_LAZY_SCOPE(context);
 
-  RenderPipelineHandleT* default_handle =
-      container.GetDefault(*context->GetContext());
-  if (container.IsDefault(opts)) {
-    return default_handle;
-  }
-
-  // The default must always be initialized in the constructor.
-  FML_CHECK(default_handle != nullptr);
-
-  const std::shared_ptr<Pipeline<PipelineDescriptor>>& pipeline =
-      default_handle->WaitAndGet();
-  if (!pipeline) {
+  auto desc = container.GetDefaultDescriptor();
+  if (!desc) {
     return nullptr;
   }
-
-  auto variant_future = pipeline->CreateVariant(
-      /*async=*/false, [&opts, variants_count = container.GetPipelineCount()](
-                           PipelineDescriptor& desc) {
-        opts.ApplyToPipelineDescriptor(desc);
-        desc.SetLabel(absl::StrCat(desc.GetLabel(), " V#", variants_count));
-      });
-  std::unique_ptr<RenderPipelineHandleT> variant =
-      std::make_unique<RenderPipelineHandleT>(std::move(variant_future));
-  container.Set(opts, std::move(variant));
-  return container.Get(opts);
+  opts.ApplyToPipelineDescriptor(*desc, key.color_attachment);
+  if (!container.IsDefault(key)) {
+    desc->SetLabel(
+        absl::StrCat(desc->GetLabel(), " V#", container.GetPipelineCount()));
+  }
+  container.Set(opts, key,
+                std::make_unique<RenderPipelineHandleT>(*context->GetContext(),
+                                                        std::move(desc),
+                                                        /*async=*/false));
+  return container.Get(key);
 }
 
 template <class TypedPipeline>
@@ -219,6 +200,51 @@ PipelineRef GetPipeline(const ContentContext* context,
   }
   return raw_ptr(pipeline->WaitAndGet());
 }
+
+// Each shader interface has its own cache. Attachment state and raster state
+// select variants within that cache.
+template <class Family>
+struct CoveragePipelines {
+  Variants<typename Family::SingleSourcePipeline> single;
+  Variants<typename Family::DualSourcePipeline> dual;
+  Variants<typename Family::FetchPipeline> fetch;
+  Variants<typename Family::BackdropPipeline> backdrop;
+
+  void CreateBlendVariants(const Context& context,
+                           ContentContextOptions options,
+                           const std::vector<Scalar>& constants = {}) {
+    const auto& caps = *context.GetCapabilities();
+    options.blend_mode = BlendMode::kSrc;
+    backdrop.CreateDefault(context, options, constants, /*lazy=*/true);
+    if (caps.SupportsDualSourceBlending()) {
+      auto dual_options = options;
+      dual_options.blend_state =
+          ResolveCoverageBlendPlan(BlendMode::kSrc, BlendSourceAlpha::kUnknown,
+                                   {.dual_source = true})
+              ->blend_state;
+      dual.CreateDefault(context, dual_options, constants, /*lazy=*/true);
+    }
+    if (caps.SupportsFramebufferFetch()) {
+      options.sample_count = SampleCount::kCount1;
+      fetch.CreateDefault(context, options, constants, /*lazy=*/true);
+    }
+  }
+
+  PipelineRef Get(const ContentContext* context,
+                  ContentContextOptions options,
+                  BlendPlan::ShaderVariant variant) {
+    switch (variant) {
+      case BlendPlan::ShaderVariant::kSingleSource:
+        return GetPipeline(context, single, options);
+      case BlendPlan::ShaderVariant::kDualSource:
+        return GetPipeline(context, dual, options);
+      case BlendPlan::ShaderVariant::kFetch:
+        return GetPipeline(context, fetch, options);
+      case BlendPlan::ShaderVariant::kBackdrop:
+        return GetPipeline(context, backdrop, options);
+    }
+  }
+};
 
 }  // namespace
 
@@ -239,7 +265,7 @@ struct ContentContext::Pipelines {
   Variants<BlendSaturationPipeline> blend_saturation;
   Variants<BlendScreenPipeline> blend_screen;
   Variants<BlendSoftLightPipeline> blend_softlight;
-  Variants<CirclePipeline> circle;
+  CoveragePipelines<CircleShaderFamily> circle;
   Variants<ClipPipeline> clip;
   Variants<ColorMatrixColorFilterPipeline> color_matrix_color_filter;
   Variants<ConicalGradientFillConicalPipeline> conical_gradient_fill;
@@ -271,7 +297,7 @@ struct ContentContext::Pipelines {
   Variants<FramebufferBlendScreenPipeline> framebuffer_blend_screen;
   Variants<FramebufferBlendSoftLightPipeline> framebuffer_blend_softlight;
   Variants<GaussianBlurPipeline> gaussian_blur;
-  Variants<GlyphAtlasPipeline> glyph_atlas;
+  CoveragePipelines<GlyphAtlasShaderFamily> glyph_atlas;
   Variants<LinearGradientFillPipeline> linear_gradient_fill;
   Variants<LinearGradientSSBOFillPipeline> linear_gradient_ssbo_fill;
   Variants<LinearGradientUniformFillPipeline> linear_gradient_uniform_fill;
@@ -296,7 +322,7 @@ struct ContentContext::Pipelines {
   Variants<TiledTexturePipeline> tiled_texture;
   Variants<VerticesUber1Shader> vertices_uber_1_;
   Variants<VerticesUber2Shader> vertices_uber_2_;
-  Variants<UberSDFPipeline> uber_sdf;
+  CoveragePipelines<UberSDFShaderFamily> uber_sdf;
   Variants<UberSDFSSBOPipeline> uber_sdf_ssbo;
   Variants<ComplexRSEPipeline> complex_rse;
   Variants<YUVToRGBFilterPipeline> yuv_to_rgb_filter;
@@ -313,126 +339,25 @@ struct ContentContext::Pipelines {
   // clang-format on
 };
 
+ColorAttachmentDescriptor ContentContextOptions::ResolveColorAttachment()
+    const {
+  auto state = blend_state
+                   ? *blend_state
+                   : ResolveBlendState(blend_mode, is_for_rrect_blur_clear);
+  state.format = color_attachment_pixel_format;
+  return state;
+}
+
 void ContentContextOptions::ApplyToPipelineDescriptor(
     PipelineDescriptor& desc) const {
-  auto pipeline_blend = blend_mode;
-  if (blend_mode > Entity::kLastPipelineBlendMode) {
-    VALIDATION_LOG << "Cannot use blend mode " << static_cast<int>(blend_mode)
-                   << " as a pipeline blend.";
-    pipeline_blend = BlendMode::kSrcOver;
-  }
+  ApplyToPipelineDescriptor(desc, ResolveColorAttachment());
+}
 
+void ContentContextOptions::ApplyToPipelineDescriptor(
+    PipelineDescriptor& desc,
+    const ColorAttachmentDescriptor& color_attachment) const {
   desc.SetSampleCount(sample_count);
-
-  ColorAttachmentDescriptor color0 = *desc.GetColorAttachmentDescriptor(0u);
-  // Variants are created from the descriptor of the default variant, so reset
-  // everything that only some of the blend modes below set.
-  color0.format = color_attachment_pixel_format;
-  color0.blending_enabled = true;
-  color0.alpha_blend_op = BlendOperation::kAdd;
-  color0.color_blend_op = BlendOperation::kAdd;
-  color0.write_mask = ColorWriteMaskBits::kAll;
-
-  switch (pipeline_blend) {
-    case BlendMode::kClear:
-      if (is_for_rrect_blur_clear) {
-        color0.alpha_blend_op = BlendOperation::kReverseSubtract;
-        color0.color_blend_op = BlendOperation::kReverseSubtract;
-        color0.dst_alpha_blend_factor = BlendFactor::kOne;
-        color0.dst_color_blend_factor = BlendFactor::kOne;
-        color0.src_alpha_blend_factor = BlendFactor::kDestinationColor;
-        color0.src_color_blend_factor = BlendFactor::kDestinationColor;
-      } else {
-        color0.dst_alpha_blend_factor = BlendFactor::kZero;
-        color0.dst_color_blend_factor = BlendFactor::kZero;
-        color0.src_alpha_blend_factor = BlendFactor::kZero;
-        color0.src_color_blend_factor = BlendFactor::kZero;
-      }
-      break;
-    case BlendMode::kSrc:
-      color0.blending_enabled = false;
-      color0.dst_alpha_blend_factor = BlendFactor::kZero;
-      color0.dst_color_blend_factor = BlendFactor::kZero;
-      color0.src_alpha_blend_factor = BlendFactor::kOne;
-      color0.src_color_blend_factor = BlendFactor::kOne;
-      break;
-    case BlendMode::kDst:
-      color0.dst_alpha_blend_factor = BlendFactor::kOne;
-      color0.dst_color_blend_factor = BlendFactor::kOne;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      color0.write_mask = ColorWriteMaskBits::kNone;
-      break;
-    case BlendMode::kSrcOver:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kOne;
-      color0.src_color_blend_factor = BlendFactor::kOne;
-      break;
-    case BlendMode::kDstOver:
-      color0.dst_alpha_blend_factor = BlendFactor::kOne;
-      color0.dst_color_blend_factor = BlendFactor::kOne;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kSrcIn:
-      color0.dst_alpha_blend_factor = BlendFactor::kZero;
-      color0.dst_color_blend_factor = BlendFactor::kZero;
-      color0.src_alpha_blend_factor = BlendFactor::kDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kDestinationAlpha;
-      break;
-    case BlendMode::kDstIn:
-      color0.dst_alpha_blend_factor = BlendFactor::kSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      break;
-    case BlendMode::kSrcOut:
-      color0.dst_alpha_blend_factor = BlendFactor::kZero;
-      color0.dst_color_blend_factor = BlendFactor::kZero;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kDstOut:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      break;
-    case BlendMode::kSrcATop:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kDestinationAlpha;
-      break;
-    case BlendMode::kDstATop:
-      color0.dst_alpha_blend_factor = BlendFactor::kSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kXor:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kPlus:
-      color0.dst_alpha_blend_factor = BlendFactor::kOne;
-      color0.dst_color_blend_factor = BlendFactor::kOne;
-      color0.src_alpha_blend_factor = BlendFactor::kOne;
-      color0.src_color_blend_factor = BlendFactor::kOne;
-      break;
-    case BlendMode::kModulate:
-      color0.dst_alpha_blend_factor = BlendFactor::kSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kSourceColor;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      break;
-    default:
-      FML_UNREACHABLE();
-  }
-  desc.SetColorAttachmentDescriptor(0u, color0);
+  desc.SetColorAttachmentDescriptor(0u, color_attachment);
 
   if (!has_depth_stencil_attachments) {
     desc.ClearDepthAttachment();
@@ -652,25 +577,31 @@ ContentContext::ContentContext(
   // rendered without the pipelines being ready. Put pipelines that are more
   // likely to be used first.
   {
-    pipelines_->glyph_atlas.CreateDefault(
-        *context_, options_triangle,
-        {static_cast<Scalar>(
-            GetContext()->GetCapabilities()->GetDefaultGlyphAtlasFormat() ==
-            PixelFormat::kA8UNormInt)});
+    const std::vector<Scalar> glyph_constants{static_cast<Scalar>(
+        GetDeviceCapabilities().GetDefaultGlyphAtlasFormat() ==
+        PixelFormat::kA8UNormInt)};
+    pipelines_->glyph_atlas.single.CreateDefault(*context_, options_triangle,
+                                                 glyph_constants);
+    pipelines_->glyph_atlas.CreateBlendVariants(*context_, options_triangle,
+                                                glyph_constants);
     // Opaque solid fills far outnumber translucent ones, both in draws and in
     // how many scenes use them.
     pipelines_->solid_fill.CreateDefault(*context_,
                                          options_opaque_trianglestrip);
     pipelines_->texture.CreateDefault(*context_, options_trianglestrip);
     pipelines_->fast_gradient.CreateDefault(*context_, options_triangle);
-    pipelines_->circle.CreateDefault(*context_, options_trianglestrip);
+    pipelines_->circle.single.CreateDefault(*context_, options_trianglestrip);
+    pipelines_->circle.CreateBlendVariants(*context_, options_trianglestrip);
     if (context_->GetFlags().use_sdfs) {
       if (context_->GetCapabilities()->SupportsSSBO()) {
         pipelines_->uber_sdf_ssbo.CreateDefault(*context_,
                                                 options_trianglestrip);
       } else {
-        pipelines_->uber_sdf.CreateDefault(*context_, options_trianglestrip);
+        pipelines_->uber_sdf.single.CreateDefault(*context_,
+                                                  options_trianglestrip);
       }
+      pipelines_->uber_sdf.CreateBlendVariants(*context_,
+                                               options_trianglestrip);
       pipelines_->complex_rse.CreateDefault(*context_, options_trianglestrip);
     }
 
@@ -1007,7 +938,7 @@ PipelineRef ContentContext::GetCachedRuntimeEffectPipeline(
     const ContentContextOptions& options,
     const std::function<std::shared_ptr<Pipeline<PipelineDescriptor>>()>&
         create_callback) const {
-  RuntimeEffectPipelineKey key{unique_entrypoint_name, options};
+  RuntimeEffectPipelineKey key{unique_entrypoint_name, options.ToKey()};
   auto it = runtime_effect_pipelines_.find(key);
   if (it == runtime_effect_pipelines_.end()) {
     it = runtime_effect_pipelines_.insert(it, {key, create_callback()});
@@ -1216,8 +1147,9 @@ PipelineRef ContentContext::GetClipPipeline(ContentContextOptions opts) const {
 }
 
 PipelineRef ContentContext::GetGlyphAtlasPipeline(
-    ContentContextOptions opts) const {
-  return GetPipeline(this, pipelines_->glyph_atlas, opts);
+    ContentContextOptions opts,
+    BlendPlan::ShaderVariant variant) const {
+  return pipelines_->glyph_atlas.Get(this, opts, variant);
 }
 
 PipelineRef ContentContext::GetYUVToRGBFilterPipeline(
@@ -1226,13 +1158,13 @@ PipelineRef ContentContext::GetYUVToRGBFilterPipeline(
 }
 
 PipelineRef ContentContext::GetUberSDFPipeline(
-    ContentContextOptions opts) const {
-  return GetPipeline(this, pipelines_->uber_sdf, opts);
-}
-
-PipelineRef ContentContext::GetUberSDFSSBOPipeline(
-    ContentContextOptions opts) const {
-  return GetPipeline(this, pipelines_->uber_sdf_ssbo, opts);
+    ContentContextOptions opts,
+    BlendPlan::ShaderVariant variant) const {
+  if (variant == BlendPlan::ShaderVariant::kSingleSource &&
+      GetDeviceCapabilities().SupportsSSBO()) {
+    return GetPipeline(this, pipelines_->uber_sdf_ssbo, opts);
+  }
+  return pipelines_->uber_sdf.Get(this, opts, variant);
 }
 
 PipelineRef ContentContext::GetComplexRSEPipeline(
@@ -1436,8 +1368,9 @@ PipelineRef ContentContext::GetDrawVerticesUberPipeline(
 }
 
 PipelineRef ContentContext::GetCirclePipeline(
-    ContentContextOptions opts) const {
-  return GetPipeline(this, pipelines_->circle, opts);
+    ContentContextOptions opts,
+    BlendPlan::ShaderVariant variant) const {
+  return pipelines_->circle.Get(this, opts, variant);
 }
 
 #ifdef IMPELLER_ENABLE_OPENGLES

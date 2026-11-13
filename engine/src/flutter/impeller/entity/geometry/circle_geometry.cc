@@ -62,36 +62,36 @@ Scalar CircleGeometry::GetAntialiasPadding() const {
   return padding_pixels_;
 }
 
+Scalar CircleGeometry::GetRadiusPadding(const Matrix& transform) const {
+  const Scalar max_basis = transform.GetMaxBasisLengthXY();
+  const Scalar expansion = max_basis == 0 ? 0.0f : padding_pixels_ / max_basis;
+  const Scalar half_width =
+      stroke_width_ < 0
+          ? 0.0f
+          : LineGeometry::ComputePixelHalfWidth(transform, stroke_width_);
+  return half_width + expansion;
+}
+
 GeometryResult CircleGeometry::GetPositionBuffer(const ContentContext& renderer,
                                                  const Entity& entity,
                                                  RenderPass& pass) const {
   auto& transform = entity.GetTransform();
-
-  Scalar max_basis = transform.GetMaxBasisLengthXY();
-  Scalar expansion = max_basis == 0 ? 0.0 : padding_pixels_ / max_basis;
+  const Scalar radius_padding = GetRadiusPadding(transform);
 
   if (stroke_width_ < 0) {
     auto generator = renderer.GetTessellator().FilledCircle(
-        transform, center_, radius_ + expansion);
+        transform, center_, radius_ + radius_padding);
     return ComputePositionGeometry(renderer, generator, entity, pass);
   }
 
-  Scalar half_width =
-      LineGeometry::ComputePixelHalfWidth(transform, stroke_width_);
-
   auto generator = renderer.GetTessellator().StrokedCircle(
-      transform, center_, radius_, half_width + expansion);
+      transform, center_, radius_, radius_padding);
 
   return ComputePositionGeometry(renderer, generator, entity, pass);
 }
 
 std::optional<Rect> CircleGeometry::GetCoverage(const Matrix& transform) const {
-  Scalar max_basis = transform.GetMaxBasisLengthXY();
-  Scalar expansion = max_basis == 0 ? 0.0 : padding_pixels_ / max_basis;
-
-  Scalar half_width = stroke_width_ < 0 ? 0.0 : stroke_width_ * 0.5f;
-  Scalar outer_radius = radius_ + half_width + expansion;
-  return Rect::MakeCircleBounds(center_, outer_radius)
+  return Rect::MakeCircleBounds(center_, radius_ + GetRadiusPadding(transform))
       .TransformAndClipBounds(transform);
 }
 

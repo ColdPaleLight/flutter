@@ -4,6 +4,7 @@
 
 #include "impeller/display_list/dl_golden_unittests.h"
 
+#include <cstring>
 #include <memory>
 #include <utility>
 
@@ -13,11 +14,17 @@
 #include "display_list/geometry/dl_path_builder.h"
 #include "flutter/display_list/dl_builder.h"
 #include "flutter/fml/closure.h"
+#include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/impeller/display_list/testing/render_text_in_canvas.h"
 #include "flutter/impeller/display_list/testing/rmse.h"
 #include "flutter/testing/testing.h"
 #include "gtest/gtest.h"
+#include "impeller/display_list/dl_dispatcher.h"
+#include "impeller/renderer/blit_pass.h"
+#include "impeller/renderer/command_buffer.h"
+#include "impeller/renderer/command_queue.h"
 #include "impeller/renderer/testing/mocks.h"
+#include "impeller/typographer/backends/skia/typographer_context_skia.h"
 
 namespace flutter {
 namespace testing {
@@ -420,6 +427,35 @@ std::optional<int32_t> CalculateSpaceBetweenUI(
 }
 }  // namespace
 
+TEST_P(DlGoldenTest, OpaqueSrcTextPreservesGlyphHole) {
+  SetWindowSize(impeller::ISize(128, 128));
+  auto render = [&](DlBlendMode blend_mode) {
+    DisplayListBuilder builder;
+    builder.DrawColor(DlColor::RGBA(0.2f, 0.6f, 0.8f, 0.7f), DlBlendMode::kSrc);
+    auto bounds = RenderTextInCanvasSkia(
+        &builder, "O", "Roboto-Regular.ttf", DlPoint(24, 90),
+        TextRenderOptions{.font_size = 72,
+                          .color = DlColor::kWhite(),
+                          .blend_mode = blend_mode});
+    EXPECT_TRUE(bounds.ok()) << bounds.status();
+    return MakeScreenshot(builder.Build());
+  };
+
+  auto reference = render(DlBlendMode::kSrcOver);
+  if (!reference) {
+    GTEST_SKIP() << "making screenshots not supported.";
+  }
+  auto result = render(DlBlendMode::kSrc);
+  ASSERT_TRUE(result);
+  EXPECT_LT(RMSE(reference.get(), result.get()), 0.1);
+
+  auto pixel_at = [&](size_t x, size_t y) {
+    return result->GetBytes() + y * result->GetBytesPerRow() + x * 4;
+  };
+  EXPECT_EQ(std::memcmp(pixel_at(48, 64), pixel_at(0, 64), 4), 0);
+  EXPECT_NE(std::memcmp(pixel_at(44, 38), pixel_at(0, 38), 4), 0);
+}
+
 TEST_P(DlGoldenTest, BaselineHE) {
   SetWindowSize(impeller::ISize(1024, 200));
   impeller::Scalar font_size = 300;
@@ -654,20 +690,27 @@ TEST_P(DlGoldenTest, SubpixelScaledTranslated) {
 }
 
 namespace {
-// Returns capabilities that forward to |capabilities| but report no
-// framebuffer fetch, which forces advanced blends into an offscreen subpass.
-std::shared_ptr<impeller::testing::MockCapabilities>
-MakeCapabilitiesWithoutFramebufferFetch(
-    const std::shared_ptr<const impeller::Capabilities>& capabilities) {
+std::shared_ptr<impeller::testing::MockCapabilities> MakeBlendTestCapabilities(
+    const std::shared_ptr<const impeller::Capabilities>& capabilities,
+    bool framebuffer_fetch = false,
+    bool supports_offscreen_msaa = true) {
   auto mock_capabilities =
       std::make_shared<impeller::testing::MockCapabilities>();
   EXPECT_CALL(*mock_capabilities, SupportsFramebufferFetch())
+      .Times(::testing::AnyNumber())
+      .WillRepeatedly(::testing::Return(framebuffer_fetch));
+  EXPECT_CALL(*mock_capabilities, SupportsDualSourceBlending())
       .Times(::testing::AnyNumber())
       .WillRepeatedly(::testing::Return(false));
   FLT_FORWARD(mock_capabilities, capabilities, GetDefaultColorFormat);
   FLT_FORWARD(mock_capabilities, capabilities, GetDefaultStencilFormat);
   FLT_FORWARD(mock_capabilities, capabilities, GetDefaultDepthStencilFormat);
-  FLT_FORWARD(mock_capabilities, capabilities, SupportsOffscreenMSAA);
+  FLT_FORWARD(mock_capabilities, capabilities,
+              GetMaximumRenderPassAttachmentSize);
+  EXPECT_CALL(*mock_capabilities, SupportsOffscreenMSAA())
+      .Times(::testing::AnyNumber())
+      .WillRepeatedly(::testing::Return(supports_offscreen_msaa &&
+                                        capabilities->SupportsOffscreenMSAA()));
   FLT_FORWARD(mock_capabilities, capabilities, SupportsImplicitResolvingMSAA);
   FLT_FORWARD(mock_capabilities, capabilities, SupportsReadFromResolve);
   FLT_FORWARD(mock_capabilities, capabilities, SupportsSSBO);
@@ -678,9 +721,414 @@ MakeCapabilitiesWithoutFramebufferFetch(
   FLT_FORWARD(mock_capabilities, capabilities, SupportsDecalSamplerAddressMode);
   FLT_FORWARD(mock_capabilities, capabilities, SupportsPrimitiveRestart);
   FLT_FORWARD(mock_capabilities, capabilities, GetMinimumUniformAlignment);
+  FLT_FORWARD(mock_capabilities, capabilities, Supports32BitPrimitiveIndices);
+  FLT_FORWARD(mock_capabilities, capabilities, NeedsPartitionedHostBuffer);
   return mock_capabilities;
 }
+
+// Read premultiplied RGBA bytes from a renderable texture.
+std::vector<uint8_t> RenderCoverageBlendPixels(
+    const std::shared_ptr<impeller::Context>& context,
+    const sk_sp<DisplayList>& display_list,
+    bool msaa,
+    bool render_only_target = false) {
+  constexpr impeller::ISize kSize(128, 128);
+  impeller::AiksContext renderer(context,
+                                 impeller::TypographerContextSkia::Make());
+  std::shared_ptr<impeller::Texture> texture;
+  const auto rgba = impeller::PixelFormat::kR8G8B8A8UNormInt;
+  if (render_only_target) {
+    impeller::RenderTargetAllocator allocator(context->GetResourceAllocator());
+    auto target = allocator.CreateOffscreen(
+        *context, kSize, 1, "Coverage blend test target",
+        impeller::RenderTarget::kDefaultColorAttachmentConfig, std::nullopt,
+        nullptr, nullptr, rgba);
+    auto color0 = target.GetColorAttachment(0);
+    auto descriptor = color0.texture->GetTextureDescriptor();
+    descriptor.usage = impeller::TextureUsage::kRenderTarget;
+    color0.texture = context->GetResourceAllocator()->CreateTexture(descriptor);
+    target.SetColorAttachment(color0, 0);
+    texture = target.GetRenderTargetTexture();
+    if (!RenderToTarget(renderer.GetContentContext(), target, display_list,
+                        impeller::Rect::MakeSize(kSize),
+                        /*reset_host_buffer=*/true, /*is_onscreen=*/false)) {
+      return {};
+    }
+  } else {
+    texture = impeller::DisplayListToTexture(
+        display_list, kSize, renderer, /*reset_host_buffer=*/true,
+        /*generate_mips=*/false, msaa ? std::nullopt : std::optional(rgba));
+  }
+  if (!texture) {
+    return {};
+  }
+  EXPECT_EQ(texture->GetTextureDescriptor().GetBytesPerRow(),
+            static_cast<size_t>(kSize.width) * 4);
+  const size_t bytes =
+      texture->GetTextureDescriptor().GetByteSizeOfBaseMipLevel();
+  auto buffer = context->GetResourceAllocator()->CreateBuffer(
+      {.storage_mode = impeller::StorageMode::kHostVisible,
+       .size = bytes,
+       .readback = true});
+  auto command = context->CreateCommandBuffer();
+  if (!buffer || !command) {
+    return {};
+  }
+  auto blit = command->CreateBlitPass();
+  if (!blit || !blit->AddCopy(texture, buffer) || !blit->EncodeCommands()) {
+    return {};
+  }
+  fml::AutoResetWaitableEvent done;
+  if (!context->GetCommandQueue()
+           ->Submit({command},
+                    [&](impeller::CommandBuffer::Status status) {
+                      EXPECT_EQ(status,
+                                impeller::CommandBuffer::Status::kCompleted);
+                      done.Signal();
+                    })
+           .ok()) {
+    return {};
+  }
+  done.Wait();
+  buffer->Invalidate();
+  const auto* pixels = buffer->OnGetContents();
+  return {pixels, pixels + bytes};
+}
+
+std::vector<uint8_t> RenderSrcGlyphPixels(
+    const std::shared_ptr<impeller::Context>& context,
+    DlBlendMode mode,
+    DlColor ink,
+    DlColor background,
+    bool msaa,
+    bool nested_layer = false,
+    const DlColorFilter* color_filter = nullptr) {
+  DisplayListBuilder builder;
+  if (nested_layer) {
+    builder.DrawColor(background, DlBlendMode::kSrc);
+    DlPaint layer_paint;
+    layer_paint.setBlendMode(DlBlendMode::kSrc);
+    builder.SaveLayer(DlRect::MakeLTRB(10, 10, 105, 110), &layer_paint);
+  }
+  // Populate the destination with draws so ending the pass must store it.
+  const auto fill =
+      DlPaint().setColor(background).setBlendMode(DlBlendMode::kSrc);
+  builder.DrawRect(DlRect::MakeLTRB(0, 0, 64, 128), fill);
+  builder.DrawRect(DlRect::MakeLTRB(64, 0, 128, 128), fill);
+  builder.ClipRect(DlRect::MakeLTRB(18, 20, 62, 110));
+  const auto bounds = RenderTextInCanvasSkia(
+      &builder, "O", "Roboto-Regular.ttf", DlPoint(24, 90),
+      TextRenderOptions{.font_size = 72,
+                        .color = ink,
+                        .blend_mode = mode,
+                        .color_filter = color_filter});
+  EXPECT_TRUE(bounds.ok()) << bounds.status();
+  if (nested_layer) {
+    builder.Restore();
+  }
+  return RenderCoverageBlendPixels(context, builder.Build(), msaa);
+}
+
+void CheckSrcCoveragePixels(const std::vector<uint8_t>& coverage,
+                            const std::vector<uint8_t>& result,
+                            uint8_t alpha,
+                            bool expect_full_coverage = true) {
+  ASSERT_FALSE(coverage.empty());
+  ASSERT_EQ(result.size(), coverage.size());
+  size_t fully_covered = 0;
+  size_t partially_covered = 0;
+  size_t uncovered = 0;
+  for (size_t i = 0; i < result.size(); i += 4) {
+    const int mask = coverage[i + 3];
+    fully_covered += mask == 255;
+    partially_covered += mask > 0 && mask < 255;
+    uncovered += mask == 0;
+    // For opaque white D and black ink, out = c*S + (1-c)*D.
+    const int expected_alpha = 255 - mask * (255 - alpha) / 255;
+    const int expected_color = 255 - mask;
+    if (std::abs(result[i + 3] - expected_alpha) > 2 ||
+        std::abs(result[i] - expected_color) > 2) {
+      ADD_FAILURE() << "coverage at pixel " << i / 4 << " is " << mask
+                    << ", expected alpha " << expected_alpha << " and color "
+                    << expected_color << ", got "
+                    << static_cast<int>(result[i + 3]) << " and "
+                    << static_cast<int>(result[i]);
+      return;
+    }
+  }
+  EXPECT_EQ(fully_covered > 0, expect_full_coverage);
+  EXPECT_GT(partially_covered, 0u);
+  EXPECT_GT(uncovered, 0u);
+}
+
+void CheckSrcGlyphSample(const std::vector<uint8_t>& result,
+                         size_t x,
+                         size_t y,
+                         uint8_t alpha,
+                         uint8_t color) {
+  const size_t pixel = (y * 128 + x) * 4;
+  ASSERT_GT(result.size(), pixel + 3);
+  EXPECT_NEAR(result[pixel + 3], alpha, 1);
+  EXPECT_NEAR(result[pixel], color, 1);
+}
+
+sk_sp<DisplayList> BuildCoverageCircle(DlBlendMode mode,
+                                       DlColor ink,
+                                       DlColor background,
+                                       bool as_oval = false,
+                                       const DlColorFilter* filter = nullptr) {
+  constexpr DlPoint kCenter(64.0f, 64.0f);
+  constexpr Scalar kRadius = 24.25f;
+  DisplayListBuilder builder;
+  builder.DrawColor(background, DlBlendMode::kSrc);
+  const auto paint = DlPaint()
+                         .setColor(ink)
+                         .setBlendMode(mode)
+                         .setAntiAlias(true)
+                         .setColorFilter(filter);
+  if (as_oval) {
+    builder.DrawOval(DlRect::MakeCircleBounds(kCenter, kRadius), paint);
+  } else {
+    builder.DrawCircle(kCenter, kRadius, paint);
+  }
+  return builder.Build();
+}
 }  // namespace
+
+TEST_P(DlGoldenTest, SrcTextMatchesCoverageReference) {
+  const auto context = GetContext();
+  const auto coverage =
+      RenderSrcGlyphPixels(context, DlBlendMode::kSrcOver, DlColor::kBlack(),
+                           DlColor::kTransparent(), /*msaa=*/false);
+  for (uint8_t alpha : {uint8_t{255}, uint8_t{128}, uint8_t{0}}) {
+    SCOPED_TRACE(static_cast<int>(alpha));
+    const auto result = RenderSrcGlyphPixels(context, DlBlendMode::kSrc,
+                                             DlColor::kBlack().withAlpha(alpha),
+                                             DlColor::kWhite(), /*msaa=*/false);
+    CheckSrcCoveragePixels(coverage, result, alpha);
+  }
+  const auto msaa = RenderSrcGlyphPixels(context, DlBlendMode::kSrc,
+                                         DlColor::kBlack().withAlpha(128),
+                                         DlColor::kWhite(), /*msaa=*/true);
+  CheckSrcGlyphSample(msaa, 48, 64, 255, 255);  // Glyph hole.
+  CheckSrcGlyphSample(msaa, 44, 38, 128, 0);    // Fully covered stroke.
+  CheckSrcGlyphSample(msaa, 70, 60, 255, 255);  // Clipped right stroke.
+}
+
+TEST_P(DlGoldenTest, SrcTextReadsTheDestinationWithFetchOrCopy) {
+  if (GetParam() != PlaygroundBackend::kMetal) {
+    GTEST_SKIP() << "Only Metal supports overriding device capabilities.";
+  }
+  const auto context = GetContext();
+  const auto original = context->GetCapabilities();
+  fml::ScopedCleanupClosure restore([&] {
+    EXPECT_TRUE(SetCapabilities(
+                    std::const_pointer_cast<impeller::Capabilities>(original))
+                    .ok());
+  });
+  const auto coverage =
+      RenderSrcGlyphPixels(context, DlBlendMode::kSrcOver, DlColor::kBlack(),
+                           DlColor::kTransparent(), /*msaa=*/false);
+  for (bool use_fetch : {true, false}) {
+    if (use_fetch && !original->SupportsFramebufferFetch()) {
+      continue;
+    }
+    SCOPED_TRACE(use_fetch);
+    ASSERT_TRUE(
+        SetCapabilities(MakeBlendTestCapabilities(original, use_fetch)).ok());
+    const auto result = RenderSrcGlyphPixels(context, DlBlendMode::kSrc,
+                                             DlColor::kBlack().withAlpha(128),
+                                             DlColor::kWhite(), /*msaa=*/false);
+    CheckSrcCoveragePixels(coverage, result, 128);
+  }
+
+  // An image of the same glyph with opacity supplied by a color filter.
+  const auto filter = DlColorFilter::MakeBlend(DlColor::kBlack().withAlpha(128),
+                                               DlBlendMode::kSrc);
+  ASSERT_TRUE(filter);
+  const auto filtered = RenderSrcGlyphPixels(
+      context, DlBlendMode::kSrc, DlColor::kBlack(), DlColor::kWhite(),
+      /*msaa=*/false, /*nested_layer=*/false, filter.get());
+  CheckSrcCoveragePixels(coverage, filtered, 128);
+}
+
+TEST_P(DlGoldenTest, SrcTextCopyPreservesClipInsideSaveLayer) {
+  if (GetParam() != PlaygroundBackend::kMetal) {
+    GTEST_SKIP() << "Only Metal supports overriding device capabilities.";
+  }
+  const auto context = GetContext();
+  const auto original = context->GetCapabilities();
+  fml::ScopedCleanupClosure restore([&] {
+    EXPECT_TRUE(SetCapabilities(
+                    std::const_pointer_cast<impeller::Capabilities>(original))
+                    .ok());
+  });
+  const auto reference = RenderSrcGlyphPixels(
+      context, DlBlendMode::kSrc, DlColor::kBlack().withAlpha(128),
+      DlColor::kWhite(), /*msaa=*/false, /*nested_layer=*/true);
+  ASSERT_TRUE(SetCapabilities(MakeBlendTestCapabilities(original)).ok());
+  const auto result = RenderSrcGlyphPixels(
+      context, DlBlendMode::kSrc, DlColor::kBlack().withAlpha(128),
+      DlColor::kWhite(), /*msaa=*/false, /*nested_layer=*/true);
+  CheckSrcGlyphSample(result, 48, 64, 255, 255);
+  CheckSrcGlyphSample(result, 44, 38, 128, 0);
+  CheckSrcGlyphSample(result, 70, 60, 255, 255);
+  ASSERT_FALSE(reference.empty());
+  ASSERT_EQ(result.size(), reference.size());
+  for (size_t i = 0; i < result.size(); i++) {
+    ASSERT_NEAR(result[i], reference[i], 1) << "Byte " << i;
+  }
+}
+
+TEST_P(DlGoldenTest, SrcCircleMatchesCoverageReference) {
+  const auto context = GetContext();
+  const auto coverage = RenderCoverageBlendPixels(
+      context,
+      BuildCoverageCircle(DlBlendMode::kSrcOver, DlColor::kBlack(),
+                          DlColor::kTransparent()),
+      /*msaa=*/false);
+  for (uint8_t alpha : {uint8_t{255}, uint8_t{128}, uint8_t{0}}) {
+    SCOPED_TRACE(static_cast<int>(alpha));
+    const auto result = RenderCoverageBlendPixels(
+        context,
+        BuildCoverageCircle(DlBlendMode::kSrc,
+                            DlColor::kBlack().withAlpha(alpha),
+                            DlColor::kWhite()),
+        /*msaa=*/false);
+    CheckSrcCoveragePixels(coverage, result, alpha);
+  }
+}
+
+TEST_P(DlGoldenTest, SrcCircleReadsDestinationOnRenderOnlyTarget) {
+  if (GetParam() != PlaygroundBackend::kMetal &&
+      GetParam() != PlaygroundBackend::kMetalSDF) {
+    GTEST_SKIP() << "Only Metal supports overriding device capabilities.";
+  }
+  const auto context = GetContext();
+  const auto original = context->GetCapabilities();
+  fml::ScopedCleanupClosure restore([&] {
+    EXPECT_TRUE(SetCapabilities(
+                    std::const_pointer_cast<impeller::Capabilities>(original))
+                    .ok());
+  });
+  const auto coverage = RenderCoverageBlendPixels(
+      context,
+      BuildCoverageCircle(DlBlendMode::kSrcOver, DlColor::kBlack(),
+                          DlColor::kTransparent()),
+      /*msaa=*/false);
+  const auto filter = DlColorFilter::MakeBlend(DlColor::kBlack().withAlpha(128),
+                                               DlBlendMode::kSrc);
+  ASSERT_TRUE(filter);
+  for (bool use_fetch : {false, true}) {
+    if (use_fetch && !original->SupportsFramebufferFetch()) {
+      continue;
+    }
+    SCOPED_TRACE(use_fetch);
+    ASSERT_TRUE(
+        SetCapabilities(MakeBlendTestCapabilities(original, use_fetch)).ok());
+    const auto result = RenderCoverageBlendPixels(
+        context,
+        BuildCoverageCircle(DlBlendMode::kSrc, DlColor::kBlack(),
+                            DlColor::kWhite(), /*as_oval=*/true, filter.get()),
+        /*msaa=*/false, /*render_only_target=*/true);
+    CheckSrcCoveragePixels(coverage, result, 128);
+  }
+}
+
+TEST_P(DlGoldenTest, SrcCircleCopyPreservesClipInsideSaveLayer) {
+  if (GetParam() != PlaygroundBackend::kMetal &&
+      GetParam() != PlaygroundBackend::kMetalSDF) {
+    GTEST_SKIP() << "Only Metal supports overriding device capabilities.";
+  }
+  const auto context = GetContext();
+  const auto original = context->GetCapabilities();
+  fml::ScopedCleanupClosure restore([&] {
+    EXPECT_TRUE(SetCapabilities(
+                    std::const_pointer_cast<impeller::Capabilities>(original))
+                    .ok());
+  });
+  ASSERT_TRUE(SetCapabilities(MakeBlendTestCapabilities(
+                                  original, /*framebuffer_fetch=*/false,
+                                  /*supports_offscreen_msaa=*/false))
+                  .ok());
+  const auto render = [&](bool mask_only) {
+    DisplayListBuilder builder;
+    builder.SaveLayer(DlRect::MakeLTRB(30, 30, 112, 108), nullptr);
+    if (!mask_only) {
+      builder.DrawColor(DlColor::kWhite(), DlBlendMode::kSrc);
+      builder.DrawRect(DlRect::MakeLTRB(30, 30, 112, 62),
+                       DlPaint().setColor(DlColor::kBlue()));
+    }
+    builder.ClipRect(DlRect::MakeLTRB(38, 35, 76, 103));
+    builder.ClipOval(DlRect::MakeXYWH(47, 53, 25, 22), DlClipOp::kDifference);
+    const auto paint =
+        DlPaint()
+            .setColor(mask_only ? DlColor::kBlack()
+                                : DlColor::kBlack().withAlpha(128))
+            .setBlendMode(mask_only ? DlBlendMode::kSrcOver
+                                    : DlBlendMode::kSrc);
+    builder.DrawCircle(DlPoint(64.0f, 64.0f), 24.25f, paint);
+    builder.Restore();
+    return RenderCoverageBlendPixels(context, builder.Build(), /*msaa=*/false);
+  };
+  const auto coverage = render(/*mask_only=*/true);
+  const auto result = render(/*mask_only=*/false);
+  ASSERT_EQ(coverage.size(), 128u * 128u * 4u);
+  ASSERT_EQ(result.size(), coverage.size());
+  // The backdrop changes color across the circle. This checks both replayed
+  // clips and backdrop coordinates inside the offset layer.
+  for (size_t y = 36; y < 102; y++) {
+    for (size_t x = 39; x < 75; x++) {
+      const size_t i = (y * 128 + x) * 4;
+      const int mask = coverage[i + 3];
+      const int uncovered = 255 - mask;
+      ASSERT_NEAR(result[i], y < 62 ? 0 : uncovered, 2) << x << "," << y;
+      ASSERT_NEAR(result[i + 2], uncovered, 2) << x << "," << y;
+      ASSERT_NEAR(result[i + 3], 255 - mask * 127 / 255, 2) << x << "," << y;
+    }
+  }
+}
+
+TEST_P(DlGoldenTest, SrcSDFSubpixelAreaModulatesCoverage) {
+  const auto context = GetContext();
+  if (!context->GetFlags().use_sdfs) {
+    GTEST_SKIP() << "Requires UberSDF shapes.";
+  }
+  for (bool line : {false, true}) {
+    SCOPED_TRACE(line);
+    const auto render = [&](DlBlendMode mode, DlColor ink, DlColor background) {
+      DisplayListBuilder shape;
+      shape.Translate(20, 20);
+      shape.TransformReset();
+      auto paint =
+          DlPaint().setColor(ink).setBlendMode(mode).setAntiAlias(true);
+      if (line) {
+        paint.setStrokeWidth(0.5f);
+        shape.DrawLine(DlPoint(28.25f, 44.5f), DlPoint(90.75f, 44.5f), paint);
+      } else {
+        shape.DrawRect(DlRect::MakeXYWH(60.25f, 44.25f, 0.5f, 0.5f), paint);
+      }
+      DisplayListBuilder builder;
+      builder.DrawColor(background, DlBlendMode::kSrc);
+      builder.Translate(0, 16);
+      builder.DrawDisplayList(shape.Build());
+      return RenderCoverageBlendPixels(context, builder.Build(),
+                                       /*msaa=*/false);
+    };
+    const auto coverage = render(DlBlendMode::kSrcOver, DlColor::kBlack(),
+                                 DlColor::kTransparent());
+    ASSERT_EQ(coverage.size(), 128u * 128u * 4u);
+    EXPECT_GT(coverage[(60 * 128 + 60) * 4 + 3], 0);
+    for (uint8_t alpha : {uint8_t{255}, uint8_t{128}, uint8_t{0}}) {
+      SCOPED_TRACE(static_cast<int>(alpha));
+      const auto result =
+          render(DlBlendMode::kSrc, DlColor::kBlack().withAlpha(alpha),
+                 DlColor::kWhite());
+      CheckSrcCoveragePixels(coverage, result, alpha,
+                             /*expect_full_coverage=*/false);
+    }
+  }
+}
 
 // Advanced blends on devices without framebuffer fetch are rendered in an
 // offscreen subpass whose render target has an integral size. The texture
@@ -701,8 +1149,7 @@ TEST_P(DlGoldenTest, StackedOffscreenAdvancedBlendsDoNotResample) {
   std::shared_ptr<const impeller::Capabilities> old_capabilities =
       GetContext()->GetCapabilities();
   ASSERT_TRUE(
-      SetCapabilities(MakeCapabilitiesWithoutFramebufferFetch(old_capabilities))
-          .ok());
+      SetCapabilities(MakeBlendTestCapabilities(old_capabilities)).ok());
   // The playground context is shared across tests, so the mocked capabilities
   // have to be undone however this test exits.
   fml::ScopedCleanupClosure restore_capabilities([&]() {
@@ -773,7 +1220,7 @@ TEST_P(DlGoldenTest, OffscreenAdvancedBlendMatchesFramebufferFetch) {
     GTEST_SKIP() << "The reference image needs framebuffer fetch.";
   }
   std::shared_ptr<impeller::Capabilities> no_fb_fetch_capabilities =
-      MakeCapabilitiesWithoutFramebufferFetch(old_capabilities);
+      MakeBlendTestCapabilities(old_capabilities);
   // The playground context is shared across tests, so the mocked capabilities
   // have to be undone however this test exits.
   fml::ScopedCleanupClosure restore_capabilities([&]() {

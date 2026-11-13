@@ -179,8 +179,19 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
 
   const auto& target_size = render_target_.GetRenderTargetSize();
 
-  render_pass_ = CreateVKRenderPass(vk_context, frame_data.render_pass,
-                                    command_buffer_, is_swapchain);
+  const auto initial_layout =
+      color0.load_action == LoadAction::kLoad
+          ? TextureVK::Cast(*color_image_vk_).GetLayout()
+          : vk::ImageLayout::eUndefined;
+  // A framebuffer can serve compatible passes with different load/store
+  // actions and layouts. The cached render pass must match those exactly.
+  const bool can_reuse_pass =
+      frame_data.color_load_action == color0.load_action &&
+      frame_data.color_store_action == color0.store_action &&
+      frame_data.color_initial_layout == initial_layout;
+  render_pass_ = CreateVKRenderPass(
+      vk_context, can_reuse_pass ? frame_data.render_pass : nullptr,
+      command_buffer_, is_swapchain);
   if (!render_pass_) {
     VALIDATION_LOG << "Could not create renderpass.";
     is_valid_ = false;
@@ -204,6 +215,9 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
 
   frame_data.framebuffer = framebuffer;
   frame_data.render_pass = render_pass_;
+  frame_data.color_load_action = color0.load_action;
+  frame_data.color_store_action = color0.store_action;
+  frame_data.color_initial_layout = initial_layout;
 
   frame_data_texture.SetCachedFrameData(frame_data, sample_count,
                                         cache_mip_level, cache_slice);

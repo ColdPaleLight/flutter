@@ -7,6 +7,7 @@
 #include "flutter/fml/logging.h"
 #include "impeller/entity/contents/color_source_contents.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/coverage_blend.h"
 #include "impeller/entity/contents/gradient_generator.h"
 #include "impeller/entity/contents/pipelines.h"
 #include "impeller/entity/contents/uber_sdf_parameters.h"
@@ -15,9 +16,6 @@
 namespace impeller {
 
 namespace {
-
-using PipelineBuilderCallback =
-    std::function<PipelineRef(ContentContextOptions)>;
 
 Scalar ToShaderType(UberSDFParameters::Type type) {
   switch (type) {
@@ -112,6 +110,7 @@ void SetupCommonFragInfo(const UberSDFParameters& params,
   frag_info.tile_mode = 0.0f;
   frag_info.inv_gradient_length = 0.0f;
   frag_info.colors_length = 0.0f;
+  frag_info.coverage_scale = params.coverage_scale;
 
   if (params.gradient) {
     SetupCommonGradientParameters(params.gradient.value(), frag_info);
@@ -136,103 +135,119 @@ UberSDFContents::~UberSDFContents() = default;
 bool UberSDFContents::Render(const ContentContext& renderer,
                              const Entity& entity,
                              RenderPass& pass) const {
-  if (renderer.GetDeviceCapabilities().SupportsSSBO()) {
-    return RenderSSBO(renderer, entity, pass);
-  }
-  return RenderTexture(renderer, entity, pass);
+  return RenderShape(renderer, entity, pass, nullptr, nullptr);
 }
 
-bool UberSDFContents::RenderTexture(const ContentContext& renderer,
-                                    const Entity& entity,
-                                    RenderPass& pass) const {
-  using VS = UberSDFPipeline::VertexShader;
-  using FS = UberSDFPipeline::FragmentShader;
-
-  auto& data_host_buffer = renderer.GetTransientsDataBuffer();
-
-  VS::FrameInfo frame_info;
-  FS::FragInfo frag_info;
-  SetupCommonFragInfo(params_, GetOpacityFactor(), entity, frag_info);
-
-  SamplerBinding sampler_binding;
+std::optional<BlendSourceAlpha> UberSDFContents::GetCoverageSourceAlpha()
+    const {
   if (params_.gradient) {
-    FML_DCHECK(params_.gradient->texture);
-    auto texture_size = params_.gradient->texture->GetSize();
-    FML_DCHECK(!texture_size.IsEmpty());
-    frag_info.half_texel = 0.5f / texture_size.width;
-
-    SamplerDescriptor sampler_desc;
-    sampler_desc.min_filter = MinMagFilter::kLinear;
-    sampler_desc.mag_filter = MinMagFilter::kLinear;
-    sampler_binding.texture = params_.gradient->texture;
-    sampler_binding.sampler =
-        renderer.GetContext()->GetSamplerLibrary()->GetSampler(sampler_desc);
-  } else {
-    sampler_binding.texture = renderer.GetEmptyTexture();
-    sampler_binding.sampler =
-        renderer.GetContext()->GetSamplerLibrary()->GetSampler({});
+    return std::nullopt;
   }
+  return ClassifyBlendSourceAlpha(params_.color.alpha * GetOpacityFactor());
+}
 
-  PipelineBuilderCallback pipeline_callback =
-      [&renderer](ContentContextOptions options) {
-        return renderer.GetUberSDFPipeline(options);
-      };
-
-  return ColorSourceContents::DrawGeometry<VS>(
-      this, GetGeometry(), renderer, entity, pass, pipeline_callback,
-      frame_info,
-      /*bind_fragment_callback=*/
-      [&frag_info, &data_host_buffer, &sampler_binding](RenderPass& pass) {
-        FS::BindColorSourceSampler(pass, sampler_binding.texture,
-                                   sampler_binding.sampler);
-        FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
-        pass.SetCommandLabel("UberSDF");
-        return true;
+bool UberSDFContents::RenderWithCoverageBlend(
+    const ContentContext& renderer,
+    const Entity& entity,
+    RenderPass& pass,
+    const CoverageBlend& blend) const {
+  return blend.Draw(
+      pass, [&] { return GetCoverage(entity); },
+      [&](RenderPass& target, const BlendBackdrop* backdrop) {
+        return RenderShape(renderer, entity, target, &blend.plan, backdrop);
       });
 }
 
-bool UberSDFContents::RenderSSBO(const ContentContext& renderer,
-                                 const Entity& entity,
-                                 RenderPass& pass) const {
-  using VS = UberSDFSSBOPipeline::VertexShader;
-  using FS = UberSDFSSBOPipeline::FragmentShader;
+bool UberSDFContents::RenderShape(const ContentContext& renderer,
+                                  const Entity& entity,
+                                  RenderPass& pass,
+                                  const BlendPlan* plan,
+                                  const BlendBackdrop* backdrop) const {
+  using Variant = BlendPlan::ShaderVariant;
+  const auto variant = plan ? plan->GetShaderVariant() : Variant::kSingleSource;
+  FML_DCHECK(variant == Variant::kSingleSource || !params_.gradient);
+  if (variant == Variant::kSingleSource &&
+      renderer.GetDeviceCapabilities().SupportsSSBO()) {
+    return DrawShape<UberSDFSSBOPipeline>(renderer, entity, pass, plan,
+                                          backdrop);
+  }
+  return UberSDFShaderFamily::Dispatch(variant, [&]<typename Pipeline>() {
+    return DrawShape<Pipeline>(renderer, entity, pass, plan, backdrop);
+  });
+}
+
+template <typename Pipeline>
+bool UberSDFContents::DrawShape(const ContentContext& renderer,
+                                const Entity& entity,
+                                RenderPass& pass,
+                                const BlendPlan* plan,
+                                const BlendBackdrop* backdrop) const {
+  using VS = typename Pipeline::VertexShader;
+  using FS = typename Pipeline::FragmentShader;
 
   auto& data_host_buffer = renderer.GetTransientsDataBuffer();
-
-  VS::FrameInfo frame_info;
-  FS::FragInfo frag_info;
+  typename FS::FragInfo frag_info;
   SetupCommonFragInfo(params_, GetOpacityFactor(), entity, frag_info);
+  frag_info.blend_outputs = BlendPlan::EncodeOutputs(plan);
 
-  std::vector<StopData> color_stops;
-  if (params_.gradient) {
-    color_stops =
-        CreateGradientColors(params_.gradient->colors, params_.gradient->stops);
-  } else {
-    // The bound ColorData is required to be non-empty to be valid. This entry
-    // is unused in the shader.
-    color_stops.resize(1);
+  SamplerBinding sampler_binding;
+  BufferView color_buffer;
+  if constexpr (requires { FS::BindColorSourceSampler; }) {
+    SamplerDescriptor sampler_desc;
+    if (params_.gradient) {
+      sampler_binding.texture = params_.gradient->texture;
+      FML_DCHECK(sampler_binding.texture);
+      auto texture_size = sampler_binding.texture->GetSize();
+      FML_DCHECK(!texture_size.IsEmpty());
+      frag_info.half_texel = 0.5f / texture_size.width;
+      sampler_desc.min_filter = MinMagFilter::kLinear;
+      sampler_desc.mag_filter = MinMagFilter::kLinear;
+    } else {
+      sampler_binding.texture = renderer.GetEmptyTexture();
+    }
+    sampler_binding.sampler =
+        renderer.GetContext()->GetSamplerLibrary()->GetSampler(sampler_desc);
+  } else if constexpr (requires { FS::BindColorData; }) {
+    // Solid ink still requires a valid storage buffer in the SSBO shader.
+    auto color_stops = params_.gradient
+                           ? CreateGradientColors(params_.gradient->colors,
+                                                  params_.gradient->stops)
+                           : std::vector<StopData>(1);
+    FML_DCHECK(!color_stops.empty());
+    frag_info.colors_length = color_stops.size();
+    color_buffer = data_host_buffer.Emplace(
+        color_stops.data(), color_stops.size() * sizeof(StopData),
+        renderer.GetDeviceCapabilities().GetMinimumStorageBufferAlignment());
   }
-  FML_DCHECK(!color_stops.empty());
-  frag_info.colors_length = static_cast<Scalar>(color_stops.size());
 
-  BufferView color_buffer = data_host_buffer.Emplace(
-      color_stops.data(), color_stops.size() * sizeof(StopData),
-      renderer.GetDeviceCapabilities().GetMinimumStorageBufferAlignment());
-
-  PipelineBuilderCallback pipeline_callback =
-      [&renderer](ContentContextOptions options) {
-        return renderer.GetUberSDFSSBOPipeline(options);
-      };
-
-  return ColorSourceContents::DrawGeometry<VS>(
-      this, GetGeometry(), renderer, entity, pass, pipeline_callback,
-      frame_info,
-      /*bind_fragment_callback=*/
-      [&frag_info, &data_host_buffer, &color_buffer](RenderPass& pass) {
-        FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
-        FS::BindColorData(pass, color_buffer);
-        pass.SetCommandLabel("UberSDFSSBO");
-        return true;
+  return DrawGeometry<VS>(
+      renderer, entity, pass,
+      [&](ContentContextOptions options) {
+        if (plan) {
+          options.blend_state = plan->blend_state;
+          options.depth_write_enabled = false;
+        }
+        return renderer.GetUberSDFPipeline(
+            options, plan ? plan->GetShaderVariant()
+                          : BlendPlan::ShaderVariant::kSingleSource);
+      },
+      typename VS::FrameInfo{},
+      [&](RenderPass& pass) {
+        if constexpr (requires { FS::BindColorSourceSampler; }) {
+          if (!FS::BindColorSourceSampler(pass, sampler_binding.texture,
+                                          sampler_binding.sampler)) {
+            return false;
+          }
+        } else if constexpr (requires { FS::BindColorData; }) {
+          if (!FS::BindColorData(pass, color_buffer)) {
+            return false;
+          }
+        }
+        pass.SetCommandLabel(requires { FS::BindColorData; } ? "UberSDFSSBO"
+                                                             : "UberSDF");
+        return FS::BindFragInfo(pass,
+                                data_host_buffer.EmplaceUniform(frag_info)) &&
+               BlendBackdrop::BindIfUsed<FS>(pass, data_host_buffer, backdrop);
       });
 }
 
@@ -261,7 +276,7 @@ std::optional<Color> UberSDFContents::AsBackgroundColor(
     const Entity& entity,
     ISize target_size) const {
   if (params_.type != UberSDFParameters::Type::kRect ||
-      params_.gradient.has_value()) {
+      params_.gradient.has_value() || params_.coverage_scale != 1.0f) {
     return std::nullopt;
   }
   const Geometry* geometry = GetGeometry();

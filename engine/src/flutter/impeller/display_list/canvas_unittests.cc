@@ -578,6 +578,10 @@ TEST_P(AiksTest, BlendModeCompatibilityWithSDFRendering) {
 
   for (int i = 0; i <= static_cast<int>(BlendMode::kLastMode); i++) {
     BlendMode blend_mode = static_cast<BlendMode>(i);
+    if (blend_mode == BlendMode::kSrc) {
+      // Src uses the coverage blend plan, which applies coverage after blend.
+      continue;
+    }
     bool blend_mode_is_compatible = true;
 
     for (const auto& src : colors) {
@@ -625,6 +629,13 @@ TEST(CanvasTest, NonAntialiasedPaintIncompatibleWithSDFRendering) {
 TEST(CanvasTest, AntialiasedPaintCompatibleWithSDFRendering) {
   Paint paint;
   EXPECT_TRUE(Canvas::IsCompatibleWithSDFRendering(paint));
+}
+
+TEST(CanvasTest, SolidSrcPaintCompatibleWithSDFRendering) {
+  Paint paint = {.blend_mode = BlendMode::kSrc};
+  EXPECT_TRUE(Canvas::IsCompatibleWithSDFRendering(paint));
+  paint.anti_alias = false;
+  EXPECT_FALSE(Canvas::IsCompatibleWithSDFRendering(paint));
 }
 
 }  // namespace testing

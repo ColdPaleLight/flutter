@@ -22,6 +22,8 @@ struct TextRenderOptions {
   DlColor color = DlColor::kYellow();
   std::shared_ptr<DlMaskFilter> mask_filter;
   bool is_subpixel = false;
+  DlBlendMode blend_mode = DlBlendMode::kSrcOver;
+  const DlColorFilter* color_filter = nullptr;
 };
 
 absl::StatusOr<DlRect> RenderTextInCanvasSkia(

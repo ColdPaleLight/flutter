@@ -4,13 +4,14 @@
 
 #include "impeller/entity/contents/text_contents.h"
 
-#include <cstring>
+#include <array>
 #include <optional>
 #include <utility>
 
 #include "impeller/core/buffer_view.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/sampler_descriptor.h"
+#include "impeller/entity/contents/coverage_blend.h"
 #include "impeller/entity/entity.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/point.h"
@@ -51,7 +52,6 @@ Point SizeToPoint(Size size) {
 }  // namespace
 
 using VS = GlyphAtlasPipeline::VertexShader;
-using FS = GlyphAtlasPipeline::FragmentShader;
 
 TextContents::TextContents() {}
 
@@ -63,6 +63,10 @@ void TextContents::SetTextFrame(const std::shared_ptr<TextFrame>& frame) {
 
 void TextContents::SetColor(Color color) {
   color_ = color;
+}
+
+void TextContents::SetUsesGlyphCoverageForBlend(bool enabled) {
+  uses_glyph_coverage_for_blend_ = enabled;
 }
 
 Color TextContents::GetColor() const {
@@ -118,13 +122,14 @@ Scalar AttractToOne(Scalar x) {
 
 }  // namespace
 
-void TextContents::ComputeVertexData(VS::PerVertexData* vtx_contents,
-                                     const Matrix& entity_offset_transform,
-                                     const std::shared_ptr<TextFrame>& frame,
-                                     Point position,
-                                     const Matrix& screen_transform,
-                                     GlyphProperties glyph_properties,
-                                     const std::shared_ptr<GlyphAtlas>& atlas) {
+size_t TextContents::ComputeVertexData(
+    VS::PerVertexData* vtx_contents,
+    const Matrix& entity_offset_transform,
+    const std::shared_ptr<TextFrame>& frame,
+    Point position,
+    const Matrix& screen_transform,
+    GlyphProperties glyph_properties,
+    const std::shared_ptr<GlyphAtlas>& atlas) {
   // Common vertex information for all glyphs.
   // All glyphs are given the same vertex information in the form of a
   // unit-sized quad. The size of the glyph is specified in per instance data
@@ -250,17 +255,44 @@ void TextContents::ComputeVertexData(VS::PerVertexData* vtx_contents,
       }
     }
   }
+  return i;
 }
 
 bool TextContents::Render(const ContentContext& renderer,
                           const Entity& entity,
                           RenderPass& pass) const {
-  Color color = GetColor();
-  if (color.IsTransparent()) {
+  return RenderGlyphs(renderer, entity, pass, nullptr);
+}
+
+std::optional<BlendSourceAlpha> TextContents::GetCoverageSourceAlpha() const {
+  if (uses_glyph_coverage_for_blend_) {
+    FML_DCHECK(frame_->GetAtlasType() == GlyphAtlas::Type::kAlphaBitmap);
+    return ClassifyBlendSourceAlpha(GetColor().alpha);
+  }
+  return std::nullopt;
+}
+
+bool TextContents::RenderWithCoverageBlend(const ContentContext& renderer,
+                                           const Entity& entity,
+                                           RenderPass& pass,
+                                           const CoverageBlend& blend) const {
+  return RenderGlyphs(renderer, entity, pass, &blend);
+}
+
+bool TextContents::RenderGlyphs(const ContentContext& renderer,
+                                const Entity& entity,
+                                RenderPass& pass,
+                                const CoverageBlend* blend) const {
+  const Color color = GetColor();
+  const auto type = frame_->GetAtlasType();
+  if (color.IsTransparent() && !blend) {
     return true;
   }
+  using DestinationRead = BlendPlan::DestinationRead;
+  using Variant = BlendPlan::ShaderVariant;
+  const auto variant =
+      blend ? blend->plan.GetShaderVariant() : Variant::kSingleSource;
 
-  GlyphAtlas::Type type = frame_->GetAtlasType();
   const std::shared_ptr<GlyphAtlas>& atlas =
       renderer.GetLazyGlyphAtlas()->CreateOrGetGlyphAtlas(
           *renderer.GetContext(), renderer.GetTransientsDataBuffer(), type);
@@ -270,39 +302,16 @@ bool TextContents::Render(const ContentContext& renderer,
     return false;
   }
 
-  // Information shared by all glyph draw calls.
-  pass.SetCommandLabel("TextFrame");
-  auto opts = OptionsFromPassAndEntity(pass, entity);
-  opts.primitive_type = PrimitiveType::kTriangle;
-  pass.SetPipeline(renderer.GetGlyphAtlasPipeline(opts));
-
-  // Common vertex uniforms for all glyphs.
-  VS::FrameInfo frame_info;
-  frame_info.mvp =
-      Entity::GetShaderTransform(entity.GetShaderClipDepth(), pass, Matrix());
   const Matrix& entity_transform = entity.GetTransform();
-  bool is_translation_scale = entity_transform.IsTranslationScaleOnly();
-
-  VS::BindFrameInfo(
-      pass, renderer.GetTransientsDataBuffer().EmplaceUniform(frame_info));
-
-  FS::FragInfo frag_info;
-  frag_info.use_text_color = force_text_color_ ? 1.0 : 0.0;
-  frag_info.text_color = ToVector(color.Premultiply());
-  frag_info.is_color_glyph = type == GlyphAtlas::Type::kColorBitmap;
-  bool enable_gamma_correction = frame_->GetEnableGammaCorrection().value_or(
-      kPlatformGammaCorrectionDefault);
-  if (enable_gamma_correction) {
+  const bool is_translation_scale = entity_transform.IsTranslationScaleOnly();
+  Scalar text_contrast = 1.0f;
+  if (frame_->GetEnableGammaCorrection().value_or(
+          kPlatformGammaCorrectionDefault)) {
     // Calculate relative luminance using Rec. 709 luma coefficients.
     Scalar luma =
         color.red * 0.2126f + color.green * 0.7152f + color.blue * 0.0722f;
-    frag_info.text_contrast = 1.0f + luma * kMaxGammaCorrection;
-  } else {
-    frag_info.text_contrast = 1.0f;
+    text_contrast = 1.0f + luma * kMaxGammaCorrection;
   }
-
-  FS::BindFragInfo(
-      pass, renderer.GetTransientsDataBuffer().EmplaceUniform(frag_info));
 
   SamplerDescriptor sampler_desc;
   if (is_translation_scale) {
@@ -342,12 +351,8 @@ bool TextContents::Render(const ContentContext& renderer,
   // No mipmaps for glyph atlas (glyphs are generated at exact scales).
   sampler_desc.mip_filter = MipFilter::kBase;
 
-  FS::BindGlyphAtlasSampler(
-      pass,                 // command
-      atlas->GetTexture(),  // texture
-      renderer.GetContext()->GetSamplerLibrary()->GetSampler(
-          sampler_desc)  // sampler
-  );
+  const auto sampler =
+      renderer.GetContext()->GetSamplerLibrary()->GetSampler(sampler_desc);
 
   HostBuffer& data_host_buffer = renderer.GetTransientsDataBuffer();
   HostBuffer& indexes_host_buffer = renderer.GetTransientsIndexesBuffer();
@@ -355,42 +360,109 @@ bool TextContents::Render(const ContentContext& renderer,
   for (const auto& run : frame_->GetRuns()) {
     glyph_count += run.GetGlyphPositions().size();
   }
-  size_t vertex_count = glyph_count * 4;
-  size_t index_count = glyph_count * 6;
-
+  // Fixed-function blending can draw the entire frame. A destination read
+  // must see preceding glyphs, so split groups when their quads intersect.
+  std::vector<std::pair<size_t, Rect>> groups;
+  Rect group_bounds;
   BufferView buffer_view = data_host_buffer.Emplace(
-      vertex_count * sizeof(VS::PerVertexData), alignof(VS::PerVertexData),
+      glyph_count * 4 * sizeof(VS::PerVertexData), alignof(VS::PerVertexData),
       [&](uint8_t* data) {
-        VS::PerVertexData* vtx_contents =
-            reinterpret_cast<VS::PerVertexData*>(data);
-        ComputeVertexData(/*vtx_contents=*/vtx_contents,
-                          /*entity_transform=*/entity.GetTransform(),
-                          /*frame=*/frame_,
-                          /*position=*/position_,
-                          /*screen_transform=*/screen_transform_,
-                          /*glyph_properties=*/properties_,
-                          /*atlas=*/atlas);
-      });
-  BufferView index_buffer_view = indexes_host_buffer.Emplace(
-      index_count * sizeof(uint16_t), alignof(uint16_t), [&](uint8_t* data) {
-        uint16_t* indices = reinterpret_cast<uint16_t*>(data);
-        size_t j = 0;
-        for (auto i = 0u; i < glyph_count; i++) {
-          size_t base = i * 4;
-          indices[j++] = base + 0;
-          indices[j++] = base + 1;
-          indices[j++] = base + 2;
-          indices[j++] = base + 1;
-          indices[j++] = base + 2;
-          indices[j++] = base + 3;
+        auto* vertices = reinterpret_cast<VS::PerVertexData*>(data);
+        glyph_count =
+            ComputeVertexData(vertices, entity_transform, frame_, position_,
+                              screen_transform_, properties_, atlas) /
+            4;
+        if (!blend || blend->plan.destination_read == DestinationRead::kNone) {
+          return;
+        }
+        for (size_t i = 0; i < glyph_count; i++) {
+          const auto* quad = vertices + 4 * i;
+          const Rect bounds =
+              Rect::MakePointBounds(
+                  std::array{quad[0].position, quad[1].position,
+                             quad[2].position, quad[3].position})
+                  .value();
+          if (bounds.IntersectsWithRect(group_bounds)) {
+            groups.emplace_back(i, group_bounds);
+            group_bounds = bounds;
+          } else {
+            group_bounds = group_bounds.Union(bounds);
+          }
         }
       });
+  if (glyph_count == 0) {
+    return true;
+  }
 
-  pass.SetVertexBuffer(std::move(buffer_view));
-  pass.SetIndexBuffer(index_buffer_view, IndexType::k16bit);
-  pass.SetElementCount(index_count);
+  const auto draw_group = [&](size_t first, size_t end, const Rect& bounds) {
+    const size_t index_count = (end - first) * 6;
+    auto indices = indexes_host_buffer.Emplace(
+        index_count * sizeof(uint16_t), alignof(uint16_t), [&](uint8_t* data) {
+          auto* out = reinterpret_cast<uint16_t*>(data);
+          for (size_t i = first; i < end; i++) {
+            const size_t base = i * 4;
+            *out++ = base;
+            *out++ = base + 1;
+            *out++ = base + 2;
+            *out++ = base + 1;
+            *out++ = base + 2;
+            *out++ = base + 3;
+          }
+        });
+    const auto draw_with_shader = [&]<class PipelineT>(
+                                      RenderPass& target,
+                                      const BlendBackdrop* backdrop) {
+      using Shader = typename PipelineT::FragmentShader;
+      typename Shader::FragInfo frag_info;
+      frag_info.use_text_color = force_text_color_ ? 1.0f : 0.0f;
+      frag_info.text_color = ToVector(color.Premultiply());
+      frag_info.is_color_glyph = type == GlyphAtlas::Type::kColorBitmap;
+      frag_info.blend_outputs =
+          BlendPlan::EncodeOutputs(blend ? &blend->plan : nullptr);
+      frag_info.text_contrast = text_contrast;
+      VS::FrameInfo frame_info;
+      frame_info.mvp = Entity::GetShaderTransform(entity.GetShaderClipDepth(),
+                                                  target, Matrix());
 
-  return pass.Draw().ok();
+      auto options = OptionsFromPassAndEntity(target, entity);
+      options.primitive_type = PrimitiveType::kTriangle;
+      if (blend) {
+        options.blend_state = blend->plan.blend_state;
+      }
+      target.SetPipeline(renderer.GetGlyphAtlasPipeline(options, variant));
+      target.SetCommandLabel("TextFrame");
+      VS::BindFrameInfo(target, data_host_buffer.EmplaceUniform(frame_info));
+      Shader::BindFragInfo(target, data_host_buffer.EmplaceUniform(frag_info));
+      Shader::BindGlyphAtlasSampler(target, atlas->GetTexture(), sampler);
+      if (!BlendBackdrop::BindIfUsed<Shader>(target, data_host_buffer,
+                                             backdrop)) {
+        return false;
+      }
+      target.SetVertexBuffer(buffer_view);
+      target.SetIndexBuffer(indices, IndexType::k16bit);
+      target.SetElementCount(index_count);
+      return target.Draw().ok();
+    };
+    const auto draw = [&](RenderPass& target, const BlendBackdrop* backdrop) {
+      return GlyphAtlasShaderFamily::Dispatch(
+          variant, [&]<typename Pipeline>() {
+            return draw_with_shader.template operator()<Pipeline>(target,
+                                                                  backdrop);
+          });
+    };
+    return blend ? blend->Draw(
+                       pass, [&] { return bounds; }, draw)
+                 : draw(pass, nullptr);
+  };
+
+  size_t first = 0;
+  for (const auto& [end, bounds] : groups) {
+    if (!draw_group(first, end, bounds)) {
+      return false;
+    }
+    first = end;
+  }
+  return draw_group(first, glyph_count, group_bounds);
 }
 
 }  // namespace impeller

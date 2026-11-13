@@ -25,6 +25,7 @@
 #include "impeller/display_list/skia_conversions.h"
 #include "impeller/entity/contents/atlas_contents.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/coverage_blend.h"
 #include "impeller/entity/contents/filters/filter_contents.h"
 #include "impeller/entity/contents/filters/inputs/filter_input.h"
 #include "impeller/entity/entity.h"
@@ -269,26 +270,28 @@ static FilterContents::BlurStyle ToBlurStyle(flutter::DlBlurStyle blur_style) {
 }
 
 // |flutter::DlOpReceiver|
-void DlDispatcherBase::setMaskFilter(const flutter::DlMaskFilter* filter) {
-  AUTO_DEPTH_WATCHER(0u);
-
-  // Needs https://github.com/flutter/flutter/issues/95434
+static std::optional<Paint::MaskBlurDescriptor> ToMaskBlurDescriptor(
+    const flutter::DlMaskFilter* filter) {
   if (filter == nullptr) {
-    paint_.mask_blur_descriptor = std::nullopt;
-    return;
+    return std::nullopt;
   }
   switch (filter->type()) {
     case flutter::DlMaskFilterType::kBlur: {
       auto blur = filter->asBlur();
 
-      paint_.mask_blur_descriptor = {
+      return Paint::MaskBlurDescriptor{
           .style = ToBlurStyle(blur->style()),
           .sigma = Sigma(blur->sigma()),
           .respect_ctm = blur->respectCTM(),
       };
-      break;
     }
   }
+  FML_UNREACHABLE();
+}
+
+void DlDispatcherBase::setMaskFilter(const flutter::DlMaskFilter* filter) {
+  AUTO_DEPTH_WATCHER(0u);
+  paint_.mask_blur_descriptor = ToMaskBlurDescriptor(filter);
 }
 
 // |flutter::DlOpReceiver|
@@ -941,14 +944,16 @@ CanvasDlDispatcher::CanvasDlDispatcher(ContentContext& renderer,
                                        bool is_onscreen,
                                        bool has_root_backdrop_filter,
                                        flutter::DlBlendMode max_root_blend_mode,
-                                       IRect32 cull_rect)
+                                       IRect32 cull_rect,
+                                       bool requires_coverage_readback)
     : DlDispatcherBase(),
       canvas_(renderer,
               render_target,
               is_onscreen,
               has_root_backdrop_filter ||
                   RequiresReadbackForBlends(renderer, max_root_blend_mode),
-              cull_rect),
+              cull_rect,
+              requires_coverage_readback),
       renderer_(renderer) {}
 
 Canvas& CanvasDlDispatcher::GetCanvas() {
@@ -980,7 +985,9 @@ void CanvasDlDispatcher::SetBackdropData(
 FirstPassDispatcher::FirstPassDispatcher(const ContentContext& renderer,
                                          const Matrix& initial_matrix,
                                          const Rect cull_rect)
-    : renderer_(renderer), matrix_(initial_matrix) {
+    : renderer_(renderer),
+      initial_matrix_(initial_matrix),
+      matrix_(initial_matrix) {
   cull_rect_state_.push_back(cull_rect);
 }
 
@@ -1044,7 +1051,7 @@ void FirstPassDispatcher::saveLayer(const DlRect& bounds,
   // This dispatcher does not track enough state to accurately compute
   // cull rects with image filters.
   auto global_cull_rect = cull_rect_state_.back();
-  if (has_image_filter_ || global_cull_rect.IsMaximum()) {
+  if (paint_.image_filter || global_cull_rect.IsMaximum()) {
     cull_rect_state_.back() = Rect::MakeMaximum();
   } else if (has_layer_bounds) {
     cull_rect_state_.back() =
@@ -1153,7 +1160,85 @@ void FirstPassDispatcher::transformFullPerspective(
 // clang-format on
 
 void FirstPassDispatcher::transformReset() {
-  matrix_ = Matrix();
+  matrix_ = initial_matrix_;
+}
+
+void FirstPassDispatcher::RecordCoverageBlend(Scalar source_alpha) {
+  const auto plan = ResolveCoverageBlendPlan(
+      paint_.blend_mode, ClassifyBlendSourceAlpha(source_alpha),
+      {.texture_copy = true});
+  coverage_may_read_destination_ |=
+      plan &&
+      plan->destination_read == BlendPlan::DestinationRead::kTextureCopy;
+}
+
+void FirstPassDispatcher::RecordSolidSDFBlend() {
+  if (!coverage_may_read_destination_ && paint_.UsesSolidCoverageForSrc() &&
+      renderer_.GetContext()->GetFlags().use_sdfs &&
+      Canvas::IsCompatibleWithSDFRendering(paint_, matrix_)) {
+    RecordCoverageBlend(paint_.FilterColor(paint_.color).alpha);
+  }
+}
+
+void FirstPassDispatcher::drawCircle(const DlPoint&, DlScalar) {
+  if (!coverage_may_read_destination_ && paint_.anti_alias &&
+      paint_.UsesSolidCoverageForSrc()) {
+    RecordCoverageBlend(paint_.FilterColor(paint_.color).alpha);
+  }
+}
+
+void FirstPassDispatcher::drawOval(const DlRect& bounds) {
+  if (Canvas::CanDrawOvalAsCircle(bounds, paint_)) {
+    drawCircle(bounds.GetCenter(), bounds.GetWidth() * 0.5f);
+  } else {
+    RecordSolidSDFBlend();
+  }
+}
+
+void FirstPassDispatcher::drawArc(const DlRect& oval_bounds,
+                                  DlScalar start_degrees,
+                                  DlScalar sweep_degrees,
+                                  bool use_center) {
+  if (Canvas::CanDrawArcAsOval(Arc(oval_bounds, Degrees(start_degrees),
+                                   Degrees(sweep_degrees), use_center),
+                               paint_)) {
+    drawOval(oval_bounds);
+  }
+}
+
+void FirstPassDispatcher::drawRect(const DlRect&) {
+  RecordSolidSDFBlend();
+}
+
+void FirstPassDispatcher::drawRoundRect(const DlRoundRect& rrect) {
+  if (rrect.GetRadii().AreAllCornersCircular()) {
+    RecordSolidSDFBlend();
+  }
+}
+
+void FirstPassDispatcher::drawRoundSuperellipse(const DlRoundSuperellipse&) {
+  RecordSolidSDFBlend();
+}
+
+void FirstPassDispatcher::drawLine(const DlPoint&, const DlPoint&) {
+  RecordSolidSDFBlend();
+}
+
+void FirstPassDispatcher::drawDashedLine(const DlPoint& p0,
+                                         const DlPoint& p1,
+                                         DlScalar on_length,
+                                         DlScalar off_length) {
+  if (!(p0.GetDistance(p1) > 0 && on_length > 0 && off_length > 0)) {
+    RecordSolidSDFBlend();
+  }
+}
+
+void FirstPassDispatcher::drawPoints(flutter::DlPointMode mode,
+                                     uint32_t count,
+                                     const DlPoint[]) {
+  if (mode != flutter::DlPointMode::kPoints && count >= 2) {
+    RecordSolidSDFBlend();
+  }
 }
 
 void FirstPassDispatcher::drawText(const std::shared_ptr<flutter::DlText>& text,
@@ -1165,6 +1250,12 @@ void FirstPassDispatcher::drawText(const std::shared_ptr<flutter::DlText>& text,
     return;
   }
 
+  Color ink = paint_.color;
+  if (paint_.UsesGlyphCoverageForSrc(*text_frame)) {
+    ink = paint_.FilterColor(ink);
+    RecordCoverageBlend(ink.alpha);
+  }
+
   properties.stroke = paint_.GetStroke();
 
   if (text_frame->HasColor()) {
@@ -1172,7 +1263,7 @@ void FirstPassDispatcher::drawText(const std::shared_ptr<flutter::DlText>& text,
     // we do not double-apply the alpha.
     properties.tone_or_color = paint_.color.WithAlpha(1.0);
   } else {
-    properties.tone_or_color = GlyphProperties::ComputeTone(paint_.color);
+    properties.tone_or_color = GlyphProperties::ComputeTone(ink);
   }
 
   renderer_.GetLazyGlyphAtlas()->AddTextFrame(text_frame,   //
@@ -1196,10 +1287,10 @@ void FirstPassDispatcher::drawDisplayList(
     DlScalar opacity) {
   [[maybe_unused]] size_t stack_depth = stack_.size();
   save();
+  const Matrix old_initial_matrix = initial_matrix_;
+  initial_matrix_ = matrix_;
   Paint old_paint = paint_;
   paint_ = Paint{};
-  bool old_has_image_filter = has_image_filter_;
-  has_image_filter_ = false;
 
   if (matrix_.HasPerspective()) {
     display_list->Dispatch(*this);
@@ -1214,12 +1305,16 @@ void FirstPassDispatcher::drawDisplayList(
   }
 
   restore();
+  initial_matrix_ = old_initial_matrix;
   paint_ = old_paint;
-  has_image_filter_ = old_has_image_filter;
   FML_DCHECK(stack_depth == stack_.size());
 }
 
 // |flutter::DlOpReceiver|
+void FirstPassDispatcher::setAntiAlias(bool aa) {
+  paint_.anti_alias = aa;
+}
+
 void FirstPassDispatcher::setDrawStyle(flutter::DlDrawStyle style) {
   paint_.style = ToStyle(style);
 }
@@ -1227,6 +1322,42 @@ void FirstPassDispatcher::setDrawStyle(flutter::DlDrawStyle style) {
 // |flutter::DlOpReceiver|
 void FirstPassDispatcher::setColor(flutter::DlColor color) {
   paint_.color = skia_conversions::ToColor(color);
+}
+
+void FirstPassDispatcher::setBlendMode(flutter::DlBlendMode mode) {
+  paint_.blend_mode = static_cast<BlendMode>(mode);
+}
+
+void FirstPassDispatcher::setColorSource(const flutter::DlColorSource* source) {
+  paint_.color_source = source;
+}
+
+void FirstPassDispatcher::setColorFilter(const flutter::DlColorFilter* filter) {
+  paint_.color_filter = filter;
+}
+
+void FirstPassDispatcher::setInvertColors(bool invert) {
+  paint_.invert_colors = invert;
+}
+
+void FirstPassDispatcher::setMaskFilter(const flutter::DlMaskFilter* filter) {
+  paint_.mask_blur_descriptor = ToMaskBlurDescriptor(filter);
+}
+
+bool FirstPassDispatcher::RequiresCoverageReadback(const RenderTarget& target,
+                                                   bool is_onscreen) const {
+  if (!coverage_may_read_destination_) {
+    return false;
+  }
+  const auto& device = renderer_.GetDeviceCapabilities();
+  const auto plan = ResolveCoverageBlendPlan(
+      BlendMode::kSrc, BlendSourceAlpha::kUnknown,
+      GetBlendPassCapabilities(device, target, /*can_copy_backdrop=*/true));
+  if (!plan ||
+      plan->destination_read != BlendPlan::DestinationRead::kTextureCopy) {
+    return false;
+  }
+  return NeedsCoverageReadbackTarget(device, target, is_onscreen);
 }
 
 // |flutter::DlOpReceiver|
@@ -1271,11 +1402,7 @@ void FirstPassDispatcher::setStrokeJoin(flutter::DlStrokeJoin join) {
 
 // |flutter::DlOpReceiver|
 void FirstPassDispatcher::setImageFilter(const flutter::DlImageFilter* filter) {
-  if (filter == nullptr) {
-    has_image_filter_ = false;
-  } else {
-    has_image_filter_ = true;
-  }
+  paint_.image_filter = filter;
 }
 
 namespace {
@@ -1351,8 +1478,8 @@ std::shared_ptr<Texture> DisplayListToTexture(
       /*is_onscreen=*/false,                     //
       display_list->root_has_backdrop_filter(),  //
       display_list->max_root_blend_mode(),       //
-      impeller::IRect32::MakeSize(size)          //
-  );
+      impeller::IRect32::MakeSize(size),         //
+      collector.RequiresCoverageReadback(target, false));
   const auto& [data, count] = collector.TakeBackdropData();
   impeller_dispatcher.SetBackdropData(data, count);
   context.GetTextShadowCache().MarkFrameStart();
@@ -1399,8 +1526,8 @@ bool RenderToTarget(ContentContext& context,
       /*is_onscreen=*/is_onscreen,               //
       display_list->root_has_backdrop_filter(),  //
       display_list->max_root_blend_mode(),       //
-      IRect32::RoundOut(cull_rect)               //
-  );
+      IRect32::RoundOut(cull_rect),              //
+      collector.RequiresCoverageReadback(render_target, is_onscreen));
   const auto& [data, count] = collector.TakeBackdropData();
   impeller_dispatcher.SetBackdropData(data, count);
   context.GetTextShadowCache().MarkFrameStart();

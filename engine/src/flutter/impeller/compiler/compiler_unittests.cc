@@ -120,6 +120,42 @@ TEST(CompilerTest, DeprecatedUnflippedDefines) {
   }
 }
 
+TEST(CompilerTest, PreservesBothDualSourceOutputsInGLES) {
+  const std::string source = R"(
+    #version 450
+    layout(location = 0, index = 0) out vec4 primary;
+    layout(location = 0, index = 1) out vec4 secondary;
+    void main() {
+      primary = vec4(0.25);
+      secondary = vec4(0.75);
+    }
+  )";
+  auto mapping = std::make_shared<fml::NonOwnedMapping>(
+      reinterpret_cast<const uint8_t*>(source.data()), source.size());
+  for (int version : {100, 300}) {
+    SCOPED_TRACE(version);
+    SourceOptions options("dual.frag", SourceType::kFragmentShader);
+    options.target_platform = TargetPlatform::kOpenGLES;
+    options.source_language = SourceLanguage::kGLSL;
+    options.gles_language_version = version;
+    options.entry_point_name = "main";
+    Reflector::Options reflection;
+    reflection.target_platform = options.target_platform;
+    reflection.shader_name = "dual";
+    Compiler compiler(mapping, options, reflection);
+    ASSERT_TRUE(compiler.IsValid()) << compiler.GetErrorMessages();
+    auto shader = compiler.GetSLShaderSource();
+    std::string_view text(reinterpret_cast<const char*>(shader->GetMapping()),
+                          shader->GetSize());
+    EXPECT_NE(text.find("GL_EXT_blend_func_extended"), std::string_view::npos);
+    EXPECT_NE(text.find(version == 100 ? "gl_FragColor" : "index = 0"),
+              std::string_view::npos);
+    EXPECT_NE(
+        text.find(version == 100 ? "gl_SecondaryFragColorEXT" : "index = 1"),
+        std::string_view::npos);
+  }
+}
+
 TEST(CompilerTest, YFlipInjectionForGLESVertexShaders) {
   // Compiles `fixture_name` for `platform` and returns the generated SL
   // source. See https://github.com/flutter/flutter/issues/186554.

@@ -198,6 +198,8 @@ constexpr MTLBlendFactor ToMTLBlendFactor(BlendFactor type) {
       return MTLBlendFactorOneMinusBlendColor;
     case BlendFactor::kBlendAlpha:
       return MTLBlendFactorBlendAlpha;
+    case BlendFactor::kOneMinusSource1Alpha:
+      return MTLBlendFactorOneMinusSource1Alpha;
     case BlendFactor::kOneMinusBlendAlpha:
       return MTLBlendFactorOneMinusBlendAlpha;
   }

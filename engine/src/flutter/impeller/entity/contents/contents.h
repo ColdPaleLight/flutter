@@ -16,12 +16,14 @@
 
 namespace impeller {
 
+enum class BlendSourceAlpha;
 class ContentContext;
 struct ContentContextOptions;
 class Entity;
 class Surface;
 class RenderPass;
 class FilterContents;
+struct CoverageBlend;
 
 ContentContextOptions OptionsFromPass(const RenderPass& pass);
 
@@ -49,6 +51,15 @@ class Contents {
   virtual bool Render(const ContentContext& renderer,
                       const Entity& entity,
                       RenderPass& pass) const = 0;
+
+  // Describes source alpha before independent shader coverage. Nullopt means
+  // this material does not implement RenderWithCoverageBlend.
+  virtual std::optional<BlendSourceAlpha> GetCoverageSourceAlpha() const;
+
+  virtual bool RenderWithCoverageBlend(const ContentContext& renderer,
+                                       const Entity& entity,
+                                       RenderPass& pass,
+                                       const CoverageBlend& blend) const;
 
   //----------------------------------------------------------------------------
   /// @brief   Get the area of the render pass that will be affected when this

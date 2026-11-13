@@ -30,6 +30,8 @@ class TextContents final : public Contents {
 
   void SetColor(Color color);
 
+  void SetUsesGlyphCoverageForBlend(bool enabled);
+
   /// @brief Force the text color to apply to the rendered glyphs, even if those
   ///        glyphs are bitmaps.
   ///
@@ -62,6 +64,14 @@ class TextContents final : public Contents {
               const Entity& entity,
               RenderPass& pass) const override;
 
+  // Source alpha before the glyph mask, when the atlas provides coverage.
+  std::optional<BlendSourceAlpha> GetCoverageSourceAlpha() const override;
+
+  bool RenderWithCoverageBlend(const ContentContext& renderer,
+                               const Entity& entity,
+                               RenderPass& pass,
+                               const CoverageBlend& blend) const override;
+
   /// @brief    Computes the vertex data for the render operation from
   ///           a collection of data drawn from the DrawTextFrame call
   ///           itself and the entity environment.
@@ -89,7 +99,8 @@ class TextContents final : public Contents {
   /// atlas              The glyph atlas containing the glyph texture and
   ///                    placement metrics for all of the glyphs that
   ///                    appear in the TextFrame.
-  static void ComputeVertexData(
+  // Returns the number of vertices written.
+  static size_t ComputeVertexData(
       GlyphAtlasPipeline::VertexShader::PerVertexData* vtx_contents,
       const Matrix& entity_transform,
       const std::shared_ptr<TextFrame>& frame,
@@ -99,11 +110,17 @@ class TextContents final : public Contents {
       const std::shared_ptr<GlyphAtlas>& atlas);
 
  private:
+  bool RenderGlyphs(const ContentContext& renderer,
+                    const Entity& entity,
+                    RenderPass& pass,
+                    const CoverageBlend* blend) const;
+
   std::shared_ptr<TextFrame> frame_;
   Scalar inherited_opacity_ = 1.0;
   Point position_;
   Matrix screen_transform_;
   bool force_text_color_ = false;
+  bool uses_glyph_coverage_for_blend_ = false;
   Color color_;
   GlyphProperties properties_;
 

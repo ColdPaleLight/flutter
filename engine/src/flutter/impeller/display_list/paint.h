@@ -27,6 +27,8 @@
 
 namespace impeller {
 
+class TextFrame;
+
 struct Paint {
   using ImageFilterProc = std::function<std::shared_ptr<FilterContents>(
       FilterInput::Ref,
@@ -115,6 +117,15 @@ struct Paint {
 
   /// @brief   Whether this paint has a color filter that can apply opacity
   bool HasColorFilter() const;
+
+  // Apply paint color effects to an unpremultiplied solid source.
+  Color FilterColor(Color source) const;
+
+  // Whether a coverage shader can apply this paint to solid ink directly.
+  bool UsesSolidCoverageForSrc() const;
+
+  // Whether text uses its atlas as an independent mask for Src.
+  bool UsesGlyphCoverageForSrc(const TextFrame& frame) const;
 
   /// @brief      Create a `ColorSourceContents` representing this paint's
   ///             shader/colors.

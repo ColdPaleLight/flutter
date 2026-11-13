@@ -119,6 +119,8 @@ constexpr GLenum ToBlendFactor(BlendFactor factor) {
       return GL_ONE_MINUS_CONSTANT_COLOR;
     case BlendFactor::kBlendAlpha:
       return GL_CONSTANT_ALPHA;
+    case BlendFactor::kOneMinusSource1Alpha:
+      return GL_ONE_MINUS_SRC1_ALPHA_EXT;
     case BlendFactor::kOneMinusBlendAlpha:
       return GL_ONE_MINUS_CONSTANT_ALPHA;
   }

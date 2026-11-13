@@ -4,6 +4,7 @@
 
 #include "impeller/entity/render_target_cache.h"
 #include "impeller/core/formats.h"
+#include "impeller/renderer/context.h"
 #include "impeller/renderer/render_target.h"
 
 namespace impeller {
@@ -76,6 +77,8 @@ RenderTarget RenderTargetCache::CreateOffscreen(
       .mip_count = static_cast<size_t>(mip_count),
       .has_msaa = false,
       .has_depth_stencil = stencil_attachment_config.has_value(),
+      .color_format = target_pixel_format.value_or(
+          context.GetCapabilities()->GetDefaultColorFormat()),
   };
 
   if (CacheEnabled()) {
@@ -136,6 +139,8 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
       .mip_count = static_cast<size_t>(mip_count),
       .has_msaa = true,
       .has_depth_stencil = stencil_attachment_config.has_value(),
+      .color_format = target_pixel_format.value_or(
+          context.GetCapabilities()->GetDefaultColorFormat()),
   };
   if (CacheEnabled()) {
     for (RenderTargetData& render_target_data : render_target_data_) {

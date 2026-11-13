@@ -130,6 +130,10 @@ class CapabilitiesGLES final
   // |Capabilities|
   bool SupportsFramebufferFetch() const override;
 
+  bool SupportsDualSourceBlending() const override {
+    return supports_dual_source_blending_;
+  }
+
   // |Capabilities|
   bool SupportsCompute() const override;
 
@@ -194,6 +198,7 @@ class CapabilitiesGLES final
  private:
   bool supports_texture_to_texture_blits_ = false;
   bool supports_framebuffer_fetch_ = false;
+  bool supports_dual_source_blending_ = false;
   bool supports_decal_sampler_address_mode_ = false;
   bool supports_offscreen_msaa_ = false;
   bool supports_implicit_msaa_ = false;

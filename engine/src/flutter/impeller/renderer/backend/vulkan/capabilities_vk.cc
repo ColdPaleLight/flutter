@@ -456,6 +456,7 @@ CapabilitiesVK::GetEnabledDeviceFeatures(
     // `max_anisotropy` greater than 1 may only be created when this feature
     // is enabled.
     required.samplerAnisotropy = supported.samplerAnisotropy;
+    required.dualSrcBlend = supported.dualSrcBlend;
 
     // Enable block-compressed texture format support when available.
     // These core Vulkan 1.0 features must be explicitly requested at device
@@ -680,6 +681,9 @@ bool CapabilitiesVK::SetPhysicalDevice(
 
   {
     const auto& features = enabled_features.get().features;
+    supports_dual_source_blending_ =
+        features.dualSrcBlend &&
+        device_properties_.limits.maxFragmentDualSrcAttachments >= 1;
     supports_texture_compression_bc_ = features.textureCompressionBC;
     supports_texture_compression_etc2_ = features.textureCompressionETC2;
     supports_texture_compression_astc_ = features.textureCompressionASTC_LDR;

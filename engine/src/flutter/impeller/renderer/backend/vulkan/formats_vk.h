@@ -70,6 +70,8 @@ constexpr vk::BlendFactor ToVKBlendFactor(BlendFactor factor) {
       return vk::BlendFactor::eOneMinusConstantColor;
     case BlendFactor::kBlendAlpha:
       return vk::BlendFactor::eConstantAlpha;
+    case BlendFactor::kOneMinusSource1Alpha:
+      return vk::BlendFactor::eOneMinusSrc1Alpha;
     case BlendFactor::kOneMinusBlendAlpha:
       return vk::BlendFactor::eOneMinusConstantAlpha;
   }

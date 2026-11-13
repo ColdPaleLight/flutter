@@ -365,7 +365,7 @@ void ContextVK::Setup(DeviceSelection selection) {
   const auto queue_create_infos = GetQueueCreateInfos(
       {graphics_queue.value(), compute_queue.value(), transfer_queue.value()});
 
-  const auto enabled_features =
+  auto enabled_features =
       caps->GetEnabledDeviceFeatures(device_holder->physical_device);
   if (!enabled_features.has_value()) {
     // This shouldn't happen since the device can't be picked if this was not
@@ -389,6 +389,9 @@ void ContextVK::Setup(DeviceSelection selection) {
     }
     device_holder->device = std::move(device_result.value);
   } else {
+    // The embedder supplies an existing device and does not report its
+    // enabled core features. Physical support alone is insufficient.
+    enabled_features->get().features.dualSrcBlend = false;
     device_holder->device.reset(settings.embedder_data->device);
   }
 

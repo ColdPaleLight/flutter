@@ -379,6 +379,7 @@ enum class BlendFactor {
   kOneMinusBlendColor,
   kBlendAlpha,
   kOneMinusBlendAlpha,
+  kOneMinusSource1Alpha,
 };
 
 enum class BlendOperation {

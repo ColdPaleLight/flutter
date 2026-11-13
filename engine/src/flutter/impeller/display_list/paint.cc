@@ -4,6 +4,8 @@
 
 #include "impeller/display_list/paint.h"
 
+#include "impeller/entity/contents/blend_plan.h"
+
 #include "impeller/display_list/dl_image_impeller.h"
 
 #include <memory>
@@ -27,6 +29,7 @@
 #include "impeller/entity/contents/tiled_texture_contents.h"
 #include "impeller/entity/geometry/geometry.h"
 #include "impeller/entity/geometry/rect_geometry.h"
+#include "impeller/typographer/text_frame.h"
 
 namespace impeller {
 
@@ -340,15 +343,8 @@ std::shared_ptr<Contents> Paint::WithColorFilter(
   // Attempt to apply the color filter on the CPU first.
   // Note: This is not just an optimization; some color sources rely on
   //       CPU-applied color filters to behave properly.
-  if (input->ApplyColorFilter([&](Color color) -> Color {
-        if (color_filter) {
-          color = GetCPUColorFilterProc(color_filter)(color);
-        }
-        if (invert_colors) {
-          color = color.ApplyColorMatrix(kColorInversion);
-        }
-        return color;
-      })) {
+  if (input->ApplyColorFilter(
+          [&](Color color) { return FilterColor(color); })) {
     return input;
   }
 
@@ -361,6 +357,25 @@ std::shared_ptr<Contents> Paint::WithColorFilter(
   }
 
   return input;
+}
+
+Color Paint::FilterColor(Color source) const {
+  if (color_filter) {
+    source = GetCPUColorFilterProc(color_filter)(source);
+  }
+  if (invert_colors) {
+    source = source.ApplyColorMatrix(kColorInversion);
+  }
+  return source;
+}
+
+bool Paint::UsesSolidCoverageForSrc() const {
+  return SupportsCoverageBlend(blend_mode) && !color_source && !image_filter &&
+         !mask_blur_descriptor;
+}
+
+bool Paint::UsesGlyphCoverageForSrc(const TextFrame& frame) const {
+  return UsesSolidCoverageForSrc() && !frame.HasColor();
 }
 
 std::shared_ptr<FilterContents> Paint::MaskBlurDescriptor::CreateMaskBlur(

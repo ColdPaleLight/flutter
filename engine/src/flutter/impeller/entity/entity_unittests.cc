@@ -19,6 +19,7 @@
 #include "impeller/core/host_buffer.h"
 #include "impeller/core/raw_ptr.h"
 #include "impeller/core/texture_descriptor.h"
+#include "impeller/entity/contents/blend_plan.h"
 #include "impeller/entity/contents/conical_gradient_contents.h"
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/contents/contents.h"
@@ -2168,25 +2169,126 @@ TEST_P(EntityTest, DecalSpecializationAppliedToMorphologyFilter) {
             expected_constants);
 }
 
-// This doesn't really tell you if the hashes will have frequent
-// collisions, but since this type is only used to hash a bounded
-// set of options, we can just compare benchmarks.
-TEST_P(EntityTest, ContentContextOptionsHasReasonableHashFunctions) {
+TEST(ContentContextOptionsTest, KeyDistinguishesPipelineState) {
   ContentContextOptions opts;
-  auto hash_a = opts.ToKey();
+  auto key_a = opts.ToKey();
 
-  opts.blend_mode = BlendMode::kColorBurn;
-  auto hash_b = opts.ToKey();
+  opts.blend_mode = BlendMode::kSrc;
+  auto key_b = opts.ToKey();
 
   opts.has_depth_stencil_attachments = false;
-  auto hash_c = opts.ToKey();
+  auto key_c = opts.ToKey();
 
   opts.primitive_type = PrimitiveType::kPoint;
-  auto hash_d = opts.ToKey();
+  auto key_d = opts.ToKey();
 
-  EXPECT_NE(hash_a, hash_b);
-  EXPECT_NE(hash_b, hash_c);
-  EXPECT_NE(hash_c, hash_d);
+  EXPECT_NE(key_a, key_b);
+  EXPECT_NE(key_b, key_c);
+  EXPECT_NE(key_c, key_d);
+}
+
+TEST(ContentContextOptionsTest, ResolvesCoveredSrcBeforeBuildingPipelineKey) {
+  using Read = BlendPlan::DestinationRead;
+  using Output = BlendPlan::Output;
+  using Variant = BlendPlan::ShaderVariant;
+  constexpr BlendPassCapabilities all_routes{
+      .dual_source = true, .framebuffer_fetch = true, .texture_copy = true};
+  ContentContextOptions options{.blend_mode = BlendMode::kSrc,
+                                .has_depth_stencil_attachments = false};
+  const auto overwrite_key = options.ToKey();
+  const auto opaque =
+      ResolveCoverageBlendPlan(BlendMode::kSrc, BlendSourceAlpha::kOpaque, {});
+  ASSERT_TRUE(opaque);
+  options.blend_state = opaque->blend_state;
+  const auto covered_key = options.ToKey();
+  EXPECT_EQ(options.blend_mode, BlendMode::kSrc);
+  EXPECT_EQ(
+      covered_key,
+      (ContentContextOptions{.has_depth_stencil_attachments = false}).ToKey());
+  EXPECT_NE(covered_key, overwrite_key);
+  EXPECT_EQ(opaque->destination_read, Read::kNone);
+  EXPECT_EQ(opaque->primary_output, Output::kCoveredSource);
+  EXPECT_EQ(opaque->GetShaderVariant(), Variant::kSingleSource);
+
+  const auto transparent = ResolveCoverageBlendPlan(
+      BlendMode::kSrc, BlendSourceAlpha::kTransparent, {});
+  ASSERT_TRUE(transparent);
+  EXPECT_EQ(transparent->primary_output, Output::kCoverage);
+  EXPECT_EQ(transparent->destination_read, Read::kNone);
+  EXPECT_EQ(transparent->blend_state.src_color_blend_factor,
+            BlendFactor::kZero);
+
+  const auto dual = ResolveCoverageBlendPlan(
+      BlendMode::kSrc, BlendSourceAlpha::kUnknown, all_routes);
+  ASSERT_TRUE(dual);
+  options.blend_state = dual->blend_state;
+  EXPECT_EQ(dual->primary_output, Output::kCoveredSource);
+  EXPECT_EQ(dual->secondary_output, Output::kCoverage);
+  EXPECT_EQ(dual->destination_read, Read::kNone);
+  EXPECT_EQ(dual->GetShaderVariant(), Variant::kDualSource);
+  EXPECT_NE(options.ToKey(), covered_key);
+  PipelineDescriptor desc;
+  options.ApplyToPipelineDescriptor(desc);
+  ASSERT_EQ(*desc.GetColorAttachmentDescriptor(0),
+            options.ToKey().color_attachment);
+  EXPECT_EQ(desc.GetColorAttachmentDescriptor(0)->dst_color_blend_factor,
+            BlendFactor::kOneMinusSource1Alpha);
+
+  const auto fetch = ResolveCoverageBlendPlan(
+      BlendMode::kSrc, BlendSourceAlpha::kUnknown,
+      {.framebuffer_fetch = true, .texture_copy = true});
+  const auto copy = ResolveCoverageBlendPlan(
+      BlendMode::kSrc, BlendSourceAlpha::kUnknown, {.texture_copy = true});
+  ASSERT_TRUE(fetch);
+  ASSERT_TRUE(copy);
+  EXPECT_EQ(fetch->primary_output, Output::kCompositedColor);
+  EXPECT_EQ(copy->primary_output, Output::kCompositedColor);
+  EXPECT_EQ(fetch->destination_read, Read::kFramebufferFetch);
+  EXPECT_EQ(copy->destination_read, Read::kTextureCopy);
+  EXPECT_EQ(fetch->GetShaderVariant(), Variant::kFetch);
+  EXPECT_EQ(copy->GetShaderVariant(), Variant::kBackdrop);
+  EXPECT_EQ(fetch->blend_state, copy->blend_state);
+  options.blend_state = copy->blend_state;
+  EXPECT_EQ(options.ToKey(), overwrite_key);
+  EXPECT_FALSE(ResolveCoverageBlendPlan(BlendMode::kSrc,
+                                        BlendSourceAlpha::kUnknown, {}));
+  EXPECT_FALSE(ResolveCoverageBlendPlan(BlendMode::kSrcIn,
+                                        BlendSourceAlpha::kOpaque, all_routes));
+}
+
+TEST_P(EntityTest, CoveredSrcReusesGlyphPipelineByBlendState) {
+  auto& renderer = GetContentContext();
+  ContentContextOptions options{
+      .color_attachment_pixel_format =
+          renderer.GetDeviceCapabilities().GetDefaultColorFormat(),
+      .has_depth_stencil_attachments = false,
+  };
+  auto src_over = renderer.GetGlyphAtlasPipeline(options);
+  ASSERT_TRUE(src_over);
+
+  options.blend_mode = BlendMode::kSrc;
+  auto overwrite = renderer.GetGlyphAtlasPipeline(options);
+  ASSERT_TRUE(overwrite);
+  EXPECT_NE(src_over, overwrite);
+
+  options.blend_state =
+      ResolveCoverageBlendPlan(BlendMode::kSrc, BlendSourceAlpha::kOpaque, {})
+          ->blend_state;
+  EXPECT_EQ(src_over, renderer.GetGlyphAtlasPipeline(options));
+
+  if (renderer.GetDeviceCapabilities().SupportsDualSourceBlending()) {
+    const auto plan = ResolveCoverageBlendPlan(
+        BlendMode::kSrc, BlendSourceAlpha::kUnknown, {.dual_source = true});
+    options.blend_state = plan->blend_state;
+    auto dual =
+        renderer.GetGlyphAtlasPipeline(options, plan->GetShaderVariant());
+    ASSERT_TRUE(dual);
+    EXPECT_NE(dual, src_over);
+    EXPECT_EQ(dual->GetDescriptor()
+                  .GetColorAttachmentDescriptor(0)
+                  ->dst_alpha_blend_factor,
+              BlendFactor::kOneMinusSource1Alpha);
+  }
 }
 
 #ifdef FML_OS_LINUX

@@ -18,6 +18,7 @@
 #include "impeller/display_list/paint.h"
 #include "impeller/entity/contents/atlas_contents.h"
 #include "impeller/entity/contents/clip_contents.h"
+#include "impeller/entity/contents/coverage_blend.h"
 #include "impeller/entity/contents/solid_rrect_like_blur_contents.h"
 #include "impeller/entity/contents/text_contents.h"
 #include "impeller/entity/contents/uber_sdf_parameters.h"
@@ -138,7 +139,8 @@ class Canvas {
                   const RenderTarget& render_target,
                   bool is_onscreen,
                   bool requires_readback,
-                  IRect32 cull_rect);
+                  IRect32 cull_rect,
+                  bool requires_coverage_readback = false);
 
   ~Canvas() = default;
 
@@ -289,6 +291,8 @@ class Canvas {
   ///
   static bool IsCompatibleWithSDFRendering(const Paint& paint,
                                            const Matrix& transform = Matrix());
+  static bool CanDrawOvalAsCircle(const Rect& rect, const Paint& paint);
+  static bool CanDrawArcAsOval(const Arc& arc, const Paint& paint);
 
  private:
   class BlurShape {
@@ -307,6 +311,7 @@ class Canvas {
   RenderTarget render_target_;
   const bool is_onscreen_;
   bool requires_readback_;
+  bool requires_coverage_readback_ = false;
   EntityPassClipStack clip_coverage_stack_;
 
   std::deque<CanvasStackEntry> transform_stack_;
@@ -353,7 +358,7 @@ class Canvas {
   void SetupRenderPass();
 
   /// @brief  Ends the current render pass, saving the result as a texture, and
-  ///         thenrestart it with the backdrop cleared to the previous contents.
+  ///         then restarts it with the previous contents.
   ///
   /// The returned texture is used as the input for backdrop filters and
   /// emulated advanced blends. Returns nullptr if there was a validation
@@ -369,10 +374,21 @@ class Canvas {
   /// This action is only safe to perform when there are no more backdrop
   /// filters or advanced blends, or no more backdrop filters and the device
   /// supports framebuffer fetch.
-  std::shared_ptr<Texture> FlipBackdrop(Point global_pass_position,
-                                        bool should_remove_texture = false,
-                                        bool should_use_onscreen = false,
-                                        bool post_depth_increment = false);
+  ///
+  /// [before_restart] can copy the completed backdrop before the next pass
+  /// begins recording.
+  /// [next_draw_depth] defaults to the next depth allocated by the canvas.
+  std::shared_ptr<Texture> FlipBackdrop(
+      Point global_pass_position,
+      bool should_remove_texture = false,
+      bool should_use_onscreen = false,
+      std::optional<uint64_t> next_draw_depth = std::nullopt,
+      std::optional<absl::FunctionRef<bool(const std::shared_ptr<Texture>&)>>
+          before_restart = {});
+
+  std::shared_ptr<Texture> CopyBackdropRegion(
+      const std::shared_ptr<Texture>& backdrop,
+      IRect region);
 
   bool BlitToOnscreen(bool is_onscreen = false);
 
@@ -405,6 +421,10 @@ class Canvas {
       const std::optional<Matrix>& shape_transform = std::nullopt);
 
   void AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth = false);
+
+  bool DrawWithCoverageBackdrop(Rect bounds,
+                                uint32_t clip_depth,
+                                DrawWithBlendBackdrop draw);
 
   /// Returns true if this operation is consistent with a DrawShadow-like
   /// operation.

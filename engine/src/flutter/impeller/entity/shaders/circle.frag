@@ -7,17 +7,18 @@ precision mediump float;
 #include <impeller/color.glsl>
 #include <impeller/types.glsl>
 
+#include "coverage_blend.glsl"
+
 uniform FragInfo {
   vec4 color;
   vec2 center;
+  vec2 blend_outputs;
   float radius;
   float stroke_width;
   float aa_pixels;
   float stroked;
 }
 frag_info;
-
-out vec4 frag_color;
 
 highp in vec2 v_position;
 
@@ -84,11 +85,7 @@ void main() {
   // the aa_pixels factor.
   float fade_size = local_dist_towards_center * frag_info.aa_pixels * 0.5;
 
-  float alpha = 1.0 - smoothstep(-fade_size, fade_size, sdf_distance);
-
-  float finalAlpha = frag_info.color.a * alpha;
-
-  frag_color = vec4(frag_info.color.rgb, finalAlpha);
-
-  frag_color = IPPremultiply(frag_color);
+  float coverage = 1.0 - smoothstep(-fade_size, fade_size, sdf_distance);
+  WriteCoverageBlend(IPPremultiply(frag_info.color), coverage,
+                     frag_info.blend_outputs);
 }

@@ -42,6 +42,11 @@ class StandardCapabilities final : public Capabilities {
   }
 
   // |Capabilities|
+  bool SupportsDualSourceBlending() const override {
+    return supports_dual_source_blending_;
+  }
+
+  // |Capabilities|
   bool SupportsCompute() const override { return supports_compute_; }
 
   // |Capabilities|
@@ -151,6 +156,7 @@ class StandardCapabilities final : public Capabilities {
                        bool supports_ssbo,
                        bool supports_texture_to_texture_blits,
                        bool supports_framebuffer_fetch,
+                       bool supports_dual_source_blending,
                        bool supports_compute,
                        bool supports_compute_subgroups,
                        bool supports_read_from_resolve,
@@ -175,6 +181,7 @@ class StandardCapabilities final : public Capabilities {
         supports_ssbo_(supports_ssbo),
         supports_texture_to_texture_blits_(supports_texture_to_texture_blits),
         supports_framebuffer_fetch_(supports_framebuffer_fetch),
+        supports_dual_source_blending_(supports_dual_source_blending),
         supports_compute_(supports_compute),
         supports_compute_subgroups_(supports_compute_subgroups),
         supports_read_from_resolve_(supports_read_from_resolve),
@@ -205,6 +212,7 @@ class StandardCapabilities final : public Capabilities {
   bool supports_ssbo_ = false;
   bool supports_texture_to_texture_blits_ = false;
   bool supports_framebuffer_fetch_ = false;
+  bool supports_dual_source_blending_ = false;
   bool supports_compute_ = false;
   bool supports_compute_subgroups_ = false;
   bool supports_read_from_resolve_ = false;
@@ -248,6 +256,12 @@ CapabilitiesBuilder& CapabilitiesBuilder::SetSupportsSSBO(bool value) {
 CapabilitiesBuilder& CapabilitiesBuilder::SetSupportsTextureToTextureBlits(
     bool value) {
   supports_texture_to_texture_blits_ = value;
+  return *this;
+}
+
+CapabilitiesBuilder& CapabilitiesBuilder::SetSupportsDualSourceBlending(
+    bool value) {
+  supports_dual_source_blending_ = value;
   return *this;
 }
 
@@ -378,6 +392,7 @@ std::unique_ptr<Capabilities> CapabilitiesBuilder::Build() {
       supports_ssbo_,                                                      //
       supports_texture_to_texture_blits_,                                  //
       supports_framebuffer_fetch_,                                         //
+      supports_dual_source_blending_,                                      //
       supports_compute_,                                                   //
       supports_compute_subgroups_,                                         //
       supports_read_from_resolve_,                                         //

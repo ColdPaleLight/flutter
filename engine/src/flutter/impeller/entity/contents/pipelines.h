@@ -10,6 +10,9 @@
 #include "impeller/entity/advanced_blend.vert.h"
 #include "impeller/entity/circle.frag.h"
 #include "impeller/entity/circle.vert.h"
+#include "impeller/entity/circle_backdrop.frag.h"
+#include "impeller/entity/circle_dual.frag.h"
+#include "impeller/entity/circle_fetch.frag.h"
 #include "impeller/entity/clip.frag.h"
 #include "impeller/entity/clip.vert.h"
 #include "impeller/entity/color_matrix_color_filter.frag.h"
@@ -23,6 +26,7 @@
 #include "impeller/entity/conical_gradient_uniform_fill_radial.frag.h"
 #include "impeller/entity/conical_gradient_uniform_fill_strip.frag.h"
 #include "impeller/entity/conical_gradient_uniform_fill_strip_radial.frag.h"
+#include "impeller/entity/contents/blend_plan.h"
 #include "impeller/entity/fast_gradient.frag.h"
 #include "impeller/entity/fast_gradient.vert.h"
 #include "impeller/entity/filter_position.vert.h"
@@ -32,6 +36,9 @@
 #include "impeller/entity/gaussian.frag.h"
 #include "impeller/entity/glyph_atlas.frag.h"
 #include "impeller/entity/glyph_atlas.vert.h"
+#include "impeller/entity/glyph_atlas_backdrop.frag.h"
+#include "impeller/entity/glyph_atlas_dual.frag.h"
+#include "impeller/entity/glyph_atlas_fetch.frag.h"
 #include "impeller/entity/gradient_fill.vert.h"
 #include "impeller/entity/linear_gradient_fill.frag.h"
 #include "impeller/entity/linear_gradient_ssbo_fill.frag.h"
@@ -62,6 +69,9 @@
 #include "impeller/entity/texture_uv_fill.vert.h"
 #include "impeller/entity/tiled_texture_fill.frag.h"
 #include "impeller/entity/uber_sdf.frag.h"
+#include "impeller/entity/uber_sdf_backdrop.frag.h"
+#include "impeller/entity/uber_sdf_dual.frag.h"
+#include "impeller/entity/uber_sdf_fetch.frag.h"
 #include "impeller/entity/uber_sdf_ssbo.frag.h"
 #include "impeller/entity/vertices_uber_1.frag.h"
 #include "impeller/entity/vertices_uber_2.frag.h"
@@ -105,6 +115,9 @@ using BlendSaturationPipeline = AdvancedBlendPipelineHandle;
 using BlendScreenPipeline = AdvancedBlendPipelineHandle;
 using BlendSoftLightPipeline = AdvancedBlendPipelineHandle;
 using CirclePipeline = RenderPipelineHandle<CircleVertexShader, CircleFragmentShader>;
+using CircleDualPipeline = RenderPipelineHandle<CircleVertexShader, CircleDualFragmentShader>;
+using CircleFetchPipeline = RenderPipelineHandle<CircleVertexShader, CircleFetchFragmentShader>;
+using CircleBackdropPipeline = RenderPipelineHandle<CircleVertexShader, CircleBackdropFragmentShader>;
 using ClipPipeline = RenderPipelineHandle<ClipVertexShader, ClipFragmentShader>;
 using ColorMatrixColorFilterPipeline = RenderPipelineHandle<FilterPositionUvVertexShader, ColorMatrixColorFilterFragmentShader>;
 using ConicalGradientFillConicalPipeline = GradientPipelineHandle<ConicalGradientFillConicalFragmentShader>;
@@ -134,6 +147,9 @@ using FramebufferBlendScreenPipeline = FramebufferBlendPipelineHandle;
 using FramebufferBlendSoftLightPipeline = FramebufferBlendPipelineHandle;
 using GaussianBlurPipeline = RenderPipelineHandle<FilterPositionUvVertexShader, GaussianFragmentShader>;
 using GlyphAtlasPipeline = RenderPipelineHandle<GlyphAtlasVertexShader, GlyphAtlasFragmentShader>;
+using GlyphAtlasDualPipeline = RenderPipelineHandle<GlyphAtlasVertexShader, GlyphAtlasDualFragmentShader>;
+using GlyphAtlasFetchPipeline = RenderPipelineHandle<GlyphAtlasVertexShader, GlyphAtlasFetchFragmentShader>;
+using GlyphAtlasBackdropPipeline = RenderPipelineHandle<GlyphAtlasVertexShader, GlyphAtlasBackdropFragmentShader>;
 using LinearGradientFillPipeline = GradientPipelineHandle<LinearGradientFillFragmentShader>;
 using LinearGradientSSBOFillPipeline = GradientPipelineHandle<LinearGradientSsboFillFragmentShader>;
 using LinearGradientUniformFillPipeline = GradientPipelineHandle<LinearGradientUniformFillFragmentShader>;
@@ -159,8 +175,37 @@ using TiledTexturePipeline = RenderPipelineHandle<TextureUvFillVertexShader, Til
 using VerticesUber1Shader = RenderPipelineHandle<PorterDuffBlendVertexShader, VerticesUber1FragmentShader>;
 using VerticesUber2Shader = RenderPipelineHandle<PorterDuffBlendVertexShader, VerticesUber2FragmentShader>;
 using UberSDFPipeline = RenderPipelineHandle<CircleVertexShader, UberSdfFragmentShader>;
+using UberSDFDualPipeline = RenderPipelineHandle<CircleVertexShader, UberSdfDualFragmentShader>;
+using UberSDFFetchPipeline = RenderPipelineHandle<CircleVertexShader, UberSdfFetchFragmentShader>;
+using UberSDFBackdropPipeline = RenderPipelineHandle<CircleVertexShader, UberSdfBackdropFragmentShader>;
 using UberSDFSSBOPipeline = RenderPipelineHandle<CircleVertexShader, UberSdfSsboFragmentShader>;
 using ComplexRSEPipeline = RenderPipelineHandle<CircleVertexShader, ComplexRseFragmentShader>;
+
+// The same family determines pipeline caching and the typed resource bindings.
+template <typename Single, typename Dual, typename Fetch, typename Backdrop>
+struct CoverageShaderFamily {
+  using SingleSourcePipeline = Single;
+  using DualSourcePipeline = Dual;
+  using FetchPipeline = Fetch;
+  using BackdropPipeline = Backdrop;
+
+  static bool Dispatch(BlendPlan::ShaderVariant variant, auto&& draw) {
+    switch (variant) {
+      case BlendPlan::ShaderVariant::kSingleSource:
+        return draw.template operator()<Single>();
+      case BlendPlan::ShaderVariant::kDualSource:
+        return draw.template operator()<Dual>();
+      case BlendPlan::ShaderVariant::kFetch:
+        return draw.template operator()<Fetch>();
+      case BlendPlan::ShaderVariant::kBackdrop:
+        return draw.template operator()<Backdrop>();
+    }
+  }
+};
+
+using CircleShaderFamily = CoverageShaderFamily<CirclePipeline, CircleDualPipeline, CircleFetchPipeline, CircleBackdropPipeline>;
+using GlyphAtlasShaderFamily = CoverageShaderFamily<GlyphAtlasPipeline, GlyphAtlasDualPipeline, GlyphAtlasFetchPipeline, GlyphAtlasBackdropPipeline>;
+using UberSDFShaderFamily = CoverageShaderFamily<UberSDFPipeline, UberSDFDualPipeline, UberSDFFetchPipeline, UberSDFBackdropPipeline>;
 using YUVToRGBFilterPipeline = RenderPipelineHandle<FilterPositionVertexShader, YuvToRgbFilterFragmentShader>;
 // clang-format on
 

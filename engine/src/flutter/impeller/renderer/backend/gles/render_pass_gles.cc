@@ -4,6 +4,8 @@
 
 #include "impeller/renderer/backend/gles/render_pass_gles.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <tuple>
@@ -51,8 +53,7 @@ namespace {
 struct BlendStateCache {
   bool blending_enabled = false;
   ColorWriteMask write_mask = ColorWriteMaskBits::kAll;
-  std::optional<std::tuple<BlendFactor, BlendFactor, BlendFactor, BlendFactor>>
-      blend_factors;
+  std::optional<std::array<BlendFactor, 4>> blend_factors;
   std::optional<std::pair<BlendOperation, BlendOperation>> blend_ops;
 
   void Configure(const ProcTableGLES& gl,
@@ -62,9 +63,9 @@ struct BlendStateCache {
         gl.Enable(GL_BLEND);
         blending_enabled = true;
       }
-      const auto factors = std::make_tuple(
+      const std::array factors = {
           color->src_color_blend_factor, color->dst_color_blend_factor,
-          color->src_alpha_blend_factor, color->dst_alpha_blend_factor);
+          color->src_alpha_blend_factor, color->dst_alpha_blend_factor};
       if (blend_factors != factors) {
         gl.BlendFuncSeparate(
             ToBlendFactor(color->src_color_blend_factor),  // src color
@@ -84,6 +85,15 @@ struct BlendStateCache {
         blend_ops = ops;
       }
     } else if (blending_enabled) {
+      // Some Adreno drivers continue using a secondary source after GL_BLEND
+      // is disabled. Replace the factors before drawing an opaque command.
+      if (blend_factors.has_value() &&
+          std::find(blend_factors->begin(), blend_factors->end(),
+                    BlendFactor::kOneMinusSource1Alpha) !=
+              blend_factors->end()) {
+        gl.BlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
+        blend_factors.reset();
+      }
       gl.Disable(GL_BLEND);
       blending_enabled = false;
     }
@@ -438,6 +448,10 @@ void RenderPassGLES::ResetGLState(const ProcTableGLES& gl) {
   gl.Disable(GL_DEPTH_TEST);
   gl.Disable(GL_STENCIL_TEST);
   gl.Disable(GL_CULL_FACE);
+  if (gl.GetCapabilities()->SupportsDualSourceBlending()) {
+    // A prior pass (or the embedder) may have left secondary factors active.
+    gl.BlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
+  }
   gl.Disable(GL_BLEND);
   gl.Disable(GL_DITHER);
   gl.ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);

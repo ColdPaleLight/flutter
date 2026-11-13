@@ -36,6 +36,16 @@ static bool DeviceSupportsFramebufferFetch(id<MTLDevice> device) {
 #endif  // FML_OS_IOS_SIMULATOR
 }
 
+static bool DeviceSupportsDualSourceBlending(id<MTLDevice> device) {
+#if FML_OS_IOS_SIMULATOR
+  return false;
+#else
+  // The Metal feature tables list dual-source blending for Apple2 and Mac2.
+  return [device supportsFamily:MTLGPUFamilyApple2] ||
+         [device supportsFamily:MTLGPUFamilyMac2];
+#endif
+}
+
 static bool DeviceSupportsComputeSubgroups(id<MTLDevice> device) {
   // Refer to the "SIMD-scoped reduction operations" feature in the table
   // below: https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
@@ -99,6 +109,7 @@ static std::unique_ptr<Capabilities> InferMetalCapabilities(
       .SetSupportsTextureToTextureBlits(true)
       .SetSupportsDecalSamplerAddressMode(true)
       .SetSupportsFramebufferFetch(DeviceSupportsFramebufferFetch(device))
+      .SetSupportsDualSourceBlending(DeviceSupportsDualSourceBlending(device))
       .SetDefaultColorFormat(color_format)
       .SetDefaultStencilFormat(PixelFormat::kS8UInt)
       .SetDefaultDepthStencilFormat(PixelFormat::kD32FloatS8UInt)

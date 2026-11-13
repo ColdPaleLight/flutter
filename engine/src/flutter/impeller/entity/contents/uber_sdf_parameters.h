@@ -139,6 +139,9 @@ struct UberSDFParameters {
   /// Rounding radii for standard rounded rects and corner radii for circular
   /// caps of superellipses for top and right octants.
   Vector4 radii;
+
+  /// Coverage lost when expanding a subpixel shape to a one-pixel minimum.
+  Scalar coverage_scale = 1.0f;
 };
 
 }  // namespace impeller

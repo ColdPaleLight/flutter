@@ -249,6 +249,10 @@ class CapabilitiesVK final : public Capabilities,
   // |Capabilities|
   bool SupportsFramebufferFetch() const override;
 
+  bool SupportsDualSourceBlending() const override {
+    return supports_dual_source_blending_;
+  }
+
   // |Capabilities|
   bool SupportsCompute() const override;
 
@@ -371,6 +375,7 @@ class CapabilitiesVK final : public Capabilities,
   bool has_primitive_restart_ = true;
   bool has_framebuffer_fetch_ = true;
   bool supports_external_fence_and_semaphore_ = false;
+  bool supports_dual_source_blending_ = false;
   bool supports_texture_compression_bc_ = false;
   bool supports_texture_compression_etc2_ = false;
   bool supports_texture_compression_astc_ = false;

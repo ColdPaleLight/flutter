@@ -16,6 +16,7 @@
 #include "impeller/geometry/rect.h"
 
 namespace impeller {
+struct BlendBackdrop;
 
 class UberSDFContents : public ColorSourceContents {
  public:
@@ -28,6 +29,13 @@ class UberSDFContents : public ColorSourceContents {
   bool Render(const ContentContext& renderer,
               const Entity& entity,
               RenderPass& pass) const override;
+
+  std::optional<BlendSourceAlpha> GetCoverageSourceAlpha() const override;
+
+  bool RenderWithCoverageBlend(const ContentContext& renderer,
+                               const Entity& entity,
+                               RenderPass& pass,
+                               const CoverageBlend& blend) const override;
 
   std::optional<Rect> GetCoverage(const Entity& entity) const override;
 
@@ -44,15 +52,18 @@ class UberSDFContents : public ColorSourceContents {
   explicit UberSDFContents(const UberSDFParameters& params,
                            std::unique_ptr<Geometry> geometry);
 
-  /// Renders using a pre-baked gradient ramp texture.
-  bool RenderTexture(const ContentContext& renderer,
-                     const Entity& entity,
-                     RenderPass& pass) const;
+  bool RenderShape(const ContentContext& renderer,
+                   const Entity& entity,
+                   RenderPass& pass,
+                   const BlendPlan* plan,
+                   const BlendBackdrop* backdrop) const;
 
-  /// Renders using a storage buffer of gradient stops.
-  bool RenderSSBO(const ContentContext& renderer,
-                  const Entity& entity,
-                  RenderPass& pass) const;
+  template <typename Pipeline>
+  bool DrawShape(const ContentContext& renderer,
+                 const Entity& entity,
+                 RenderPass& pass,
+                 const BlendPlan* plan,
+                 const BlendBackdrop* backdrop) const;
 
   UberSDFParameters params_;
   std::unique_ptr<Geometry> geometry_;

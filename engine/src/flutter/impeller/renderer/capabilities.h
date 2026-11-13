@@ -72,6 +72,8 @@ class Capabilities {
   ///         ```
   virtual bool SupportsFramebufferFetch() const = 0;
 
+  virtual bool SupportsDualSourceBlending() const { return false; }
+
   /// @brief  Whether the context backend supports `ComputePass`.
   virtual bool SupportsCompute() const = 0;
 
@@ -217,6 +219,8 @@ class CapabilitiesBuilder {
 
   CapabilitiesBuilder& SetSupportsFramebufferFetch(bool value);
 
+  CapabilitiesBuilder& SetSupportsDualSourceBlending(bool value);
+
   CapabilitiesBuilder& SetSupportsCompute(bool value);
 
   CapabilitiesBuilder& SetSupportsComputeSubgroups(bool value);
@@ -260,6 +264,7 @@ class CapabilitiesBuilder {
   bool supports_ssbo_ = false;
   bool supports_texture_to_texture_blits_ = false;
   bool supports_framebuffer_fetch_ = false;
+  bool supports_dual_source_blending_ = false;
   bool supports_compute_ = false;
   bool supports_compute_subgroups_ = false;
   bool supports_read_from_resolve_ = false;

@@ -313,7 +313,8 @@ class CanvasDlDispatcher : public DlDispatcherBase {
                      bool is_onscreen,
                      bool has_root_backdrop_filter,
                      flutter::DlBlendMode max_root_blend_mode,
-                     IRect32 cull_rect);
+                     IRect32 cull_rect,
+                     bool requires_coverage_readback = false);
 
   ~CanvasDlDispatcher() = default;
 
@@ -424,6 +425,32 @@ class FirstPassDispatcher : public flutter::IgnoreAttributeDispatchHelper,
 
   void transformReset() override;
 
+  void drawCircle(const DlPoint& center, DlScalar radius) override;
+
+  void drawOval(const DlRect& bounds) override;
+
+  void drawArc(const DlRect& oval_bounds,
+               DlScalar start_degrees,
+               DlScalar sweep_degrees,
+               bool use_center) override;
+
+  void drawRect(const DlRect& rect) override;
+
+  void drawRoundRect(const DlRoundRect& rrect) override;
+
+  void drawRoundSuperellipse(const DlRoundSuperellipse& rse) override;
+
+  void drawLine(const DlPoint& p0, const DlPoint& p1) override;
+
+  void drawDashedLine(const DlPoint& p0,
+                      const DlPoint& p1,
+                      DlScalar on_length,
+                      DlScalar off_length) override;
+
+  void drawPoints(flutter::DlPointMode mode,
+                  uint32_t count,
+                  const DlPoint points[]) override;
+
   void drawText(const std::shared_ptr<flutter::DlText>& text,
                 DlScalar x,
                 DlScalar y) override;
@@ -432,10 +459,22 @@ class FirstPassDispatcher : public flutter::IgnoreAttributeDispatchHelper,
                        DlScalar opacity) override;
 
   // |flutter::DlOpReceiver|
+  void setAntiAlias(bool aa) override;
+
   void setDrawStyle(flutter::DlDrawStyle style) override;
 
   // |flutter::DlOpReceiver|
   void setColor(flutter::DlColor color) override;
+
+  void setBlendMode(flutter::DlBlendMode mode) override;
+
+  void setColorSource(const flutter::DlColorSource* source) override;
+
+  void setColorFilter(const flutter::DlColorFilter* filter) override;
+
+  void setInvertColors(bool invert) override;
+
+  void setMaskFilter(const flutter::DlMaskFilter* filter) override;
 
   // |flutter::DlOpReceiver|
   void setStrokeWidth(DlScalar width) override;
@@ -455,18 +494,24 @@ class FirstPassDispatcher : public flutter::IgnoreAttributeDispatchHelper,
   std::pair<std::unordered_map<int64_t, BackdropData>, size_t>
   TakeBackdropData();
 
+  bool RequiresCoverageReadback(const RenderTarget& target,
+                                bool is_onscreen) const;
+
  private:
+  void RecordCoverageBlend(Scalar source_alpha);
+  void RecordSolidSDFBlend();
   const Rect GetCurrentLocalCullingBounds() const;
 
   const ContentContext& renderer_;
+  Matrix initial_matrix_;
   Matrix matrix_;
   std::vector<Matrix> stack_;
   std::unordered_map<int64_t, BackdropData> backdrop_data_;
   // note: cull rects are always in the global coordinate space.
   std::vector<Rect> cull_rect_state_;
-  bool has_image_filter_ = false;
   size_t backdrop_count_ = 0;
   Paint paint_;
+  bool coverage_may_read_destination_ = false;
 };
 
 /// Render the provided display list to a texture with the given size.

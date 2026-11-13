@@ -288,6 +288,7 @@ class MockCapabilities : public Capabilities {
   MOCK_METHOD(bool, SupportsSSBO, (), (const, override));
   MOCK_METHOD(bool, SupportsTextureToTextureBlits, (), (const, override));
   MOCK_METHOD(bool, SupportsFramebufferFetch, (), (const, override));
+  MOCK_METHOD(bool, SupportsDualSourceBlending, (), (const, override));
   MOCK_METHOD(bool, SupportsCompute, (), (const, override));
   MOCK_METHOD(bool, SupportsComputeSubgroups, (), (const, override));
   MOCK_METHOD(bool, SupportsReadFromResolve, (), (const, override));

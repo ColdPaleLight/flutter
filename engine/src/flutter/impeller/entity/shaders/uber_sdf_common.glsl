@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Shared body of the UberSDF shaders, included by `uber_sdf.frag` and
-// `uber_sdf_ssbo.frag`. Each entrypoint supplies only `getGradientColor()`.
+// Shared body of the UberSDF shaders. The gradient variants provide
+// `getGradientColor()`. The coverage-aware Src variants use solid ink.
 
 precision mediump float;
 
@@ -13,6 +13,7 @@ precision mediump float;
 #include <impeller/texture.glsl>
 #include <impeller/types.glsl>
 
+#include "coverage_blend.glsl"
 #include "rse_sdf.glsl"
 #include "sdf_functions.glsl"
 #include "sdf_utils.glsl"
@@ -51,6 +52,7 @@ uniform FragInfo {
   vec2 size;
   /// The size of a device pixel in local coordinates.
   vec2 pixel_size;
+  vec2 blend_outputs;
 
   // --- Superellipse Parameters ---
   /// The exponent degree (n_x, n_y) of the superellipse curvature.
@@ -120,13 +122,20 @@ uniform FragInfo {
   ///
   /// Only used by the storage buffer variant.
   float colors_length;
+  float coverage_scale;
 }
 frag_info;
 
-out vec4 frag_color;
-
 highp in vec2 v_position;
 
+// Coverage-aware Src currently takes the solid-ink path, so these variants
+// have no gradient resources on either backend.
+#if defined(COVERAGE_BLEND_DUAL_SOURCE) || defined(COVERAGE_BLEND_FETCH) || \
+    defined(COVERAGE_BLEND_BACKDROP)
+vec4 getColor() {
+  return frag_info.color;
+}
+#else
 // Looks up the gradient color at gradient position `t`.
 //
 // `t` is untiled, so implementations apply frag_info.tile_mode themselves.
@@ -157,6 +166,7 @@ vec4 getColor() {
   }
   return color;
 }
+#endif
 
 float distanceFromCircle(vec2 p, float radius) {
   return length(p) - radius;
@@ -381,6 +391,6 @@ void main() {
     alpha = gammaCorrectedAlpha(alpha, color.rgb);
   }
 
-  frag_color = vec4(color.rgb, color.a * alpha);
-  frag_color = IPPremultiply(frag_color);
+  WriteCoverageBlend(IPPremultiply(color), alpha * frag_info.coverage_scale,
+                     frag_info.blend_outputs);
 }

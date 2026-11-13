@@ -190,6 +190,11 @@ CapabilitiesGLES::CapabilitiesGLES(const ProcTableGLES& gl) {
   }
 
   supports_framebuffer_fetch_ = desc->HasExtension(kFramebufferFetchExt);
+  if (desc->IsES() && desc->HasExtension("GL_EXT_blend_func_extended")) {
+    GLint outputs = 0;
+    gl.GetIntegerv(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS_EXT, &outputs);
+    supports_dual_source_blending_ = outputs >= 1;
+  }
 
   if (desc->HasExtension(kTextureBorderClampExt) ||
       desc->HasExtension(kNvidiaTextureBorderClampExt)) {

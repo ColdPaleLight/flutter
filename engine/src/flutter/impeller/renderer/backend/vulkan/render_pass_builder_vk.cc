@@ -190,16 +190,17 @@ vk::UniqueRenderPass RenderPassBuilderVK::Build(
   subpass0.setPDepthStencilAttachment(&depth_stencil_ref);
 
   vk::SubpassDependency deps[3];
-  // Incoming dependency. If the attachments were previously used
-  // as attachments for a render pass, or sampled from/transfered to,
-  // then these operations must complete before we resolve anything
-  // to the onscreen.
+  // Keep prior draws, samples, and backdrop copies ordered before this pass.
+  // Use the same dependency for all layouts so the render passes stay
+  // compatible with each other and with the pipelines built for them.
   deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
   deps[0].dstSubpass = 0u;
   deps[0].srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput |
-                         vk::PipelineStageFlagBits::eFragmentShader;
+                         vk::PipelineStageFlagBits::eFragmentShader |
+                         vk::PipelineStageFlagBits::eTransfer;
   deps[0].srcAccessMask = vk::AccessFlagBits::eShaderRead |
-                          vk::AccessFlagBits::eColorAttachmentWrite;
+                          vk::AccessFlagBits::eColorAttachmentWrite |
+                          vk::AccessFlagBits::eTransferRead;
   deps[0].dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
   // A color attachment with a LOAD loadOp is read at the color attachment
   // output stage, so the read must be in the destination scope for the layout

@@ -190,7 +190,8 @@ static const constexpr RenderTarget::AttachmentConfig kDefaultStencilConfig =
 static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
     ContentContext& renderer,
     ISize size,
-    const Color& clear_color) {
+    const Color& clear_color,
+    const RenderTarget* match = nullptr) {
   const std::shared_ptr<Context>& context = renderer.GetContext();
 
   /// All of the load/store actions are managed by `InlinePassContext` when
@@ -199,7 +200,10 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
   /// changed for the lifetime of the textures.
 
   RenderTarget target;
-  if (context->GetCapabilities()->SupportsOffscreenMSAA()) {
+  const auto format =
+      match ? std::optional(match->GetRenderTargetPixelFormat()) : std::nullopt;
+  if (context->GetCapabilities()->SupportsOffscreenMSAA() &&
+      (!match || match->GetSampleCount() != SampleCount::kCount1)) {
     target = renderer.GetRenderTargetCache()->CreateOffscreenMSAA(
         /*context=*/*context,
         /*size=*/size,
@@ -212,7 +216,8 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
             .load_action = LoadAction::kDontCare,
             .store_action = StoreAction::kMultisampleResolve,
             .clear_color = clear_color},
-        /*stencil_attachment_config=*/kDefaultStencilConfig);
+        /*stencil_attachment_config=*/kDefaultStencilConfig, nullptr, nullptr,
+        nullptr, format);
   } else {
     target = renderer.GetRenderTargetCache()->CreateOffscreen(
         *context,  // context
@@ -224,9 +229,8 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
             .load_action = LoadAction::kDontCare,
             .store_action = StoreAction::kDontCare,
             .clear_color = clear_color,
-        },                     // color_attachment_config
-        kDefaultStencilConfig  //
-    );
+        },  // color_attachment_config
+        kDefaultStencilConfig, nullptr, nullptr, format);
   }
 
   return std::make_unique<EntityPassTarget>(
@@ -236,36 +240,31 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
   );
 }
 
-/// @brief  Expands the rectangle to satisfy a 1-device-pixel minimum size using
-///         the given transform and scales alpha based on the ratio of local
-///         areas when `scale_alpha` is true.
+/// Expands to a one-device-pixel minimum and returns the original area ratio.
 ///
 ///         If the shape is scaled to zero under the transform or if its alpha
 ///         scales close to zero, an empty `Rect` is returned to indicate that
 ///         the shape is effectively invisible.
-static std::pair<Rect, Color> ExpandRectToPixelMinimum(const Rect& rect,
-                                                       const Color& color,
-                                                       const Matrix& transform,
-                                                       bool scale_alpha) {
+static std::pair<Rect, Scalar> ExpandRectToPixelMinimum(const Rect& rect,
+                                                        const Matrix& transform,
+                                                        bool scale_coverage) {
   std::optional<Rect> expanded =
       rect.ExpandToMinTransformedSize({1.0f, 1.0f}, transform);
   if (!expanded) {
     // Rect is scaled to 0.
-    return {Rect(), color};
+    return {};
   }
 
-  // No alpha scaling needed.
-  if (!scale_alpha) {
-    return {expanded.value(), color};
+  if (!scale_coverage) {
+    return {expanded.value(), 1.0f};
   }
 
-  // Scale alpha based on expanded ratio.
-  Scalar alpha_scaling = rect.Area() / expanded->Area();
-  if (alpha_scaling < kEhCloseEnough) {
+  const Scalar coverage = rect.Area() / expanded->Area();
+  if (coverage < kEhCloseEnough) {
     // Rect is effectively invisible.
-    return {Rect(), color};
+    return {};
   }
-  return {expanded.value(), color.WithAlpha(color.alpha * alpha_scaling)};
+  return {expanded.value(), coverage};
 }
 
 /// @brief  Attempts to create UberSDF GradientParameters from a DlColorSource,
@@ -484,11 +483,13 @@ Canvas::Canvas(ContentContext& renderer,
                const RenderTarget& render_target,
                bool is_onscreen,
                bool requires_readback,
-               IRect32 cull_rect)
+               IRect32 cull_rect,
+               bool requires_coverage_readback)
     : renderer_(renderer),
       render_target_(render_target),
       is_onscreen_(is_onscreen),
-      requires_readback_(requires_readback),
+      requires_readback_(requires_readback || requires_coverage_readback),
+      requires_coverage_readback_(requires_coverage_readback),
       clip_coverage_stack_(EntityPassClipStack(
           Rect::MakeSize(render_target.GetRenderTargetSize()))) {
   Initialize(Rect::MakeLTRB(cull_rect.GetLeft(), cull_rect.GetTop(),
@@ -691,8 +692,12 @@ bool Canvas::AttemptColorFilterOptimization(
 bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
                                           Scalar radius,
                                           const Paint& paint) {
-  if (paint.HasColorFilter() || paint.image_filter || paint.invert_colors ||
-      paint.color_source || paint.mask_blur_descriptor.has_value()) {
+  if (paint.blend_mode == BlendMode::kSrc) {
+    if (!paint.anti_alias || !paint.UsesSolidCoverageForSrc()) {
+      return false;
+    }
+  } else if (paint.HasColorFilter() || paint.image_filter ||
+             paint.color_source || paint.mask_blur_descriptor.has_value()) {
     return false;
   }
 
@@ -709,8 +714,10 @@ bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
   }
   geom->SetAntialiasPadding(kAntialiasPadding);
 
-  auto contents =
-      CircleContents::Make(std::move(geom), paint.color, is_stroked);
+  const Color color = paint.blend_mode == BlendMode::kSrc
+                          ? paint.FilterColor(paint.color)
+                          : paint.color;
+  auto contents = CircleContents::Make(std::move(geom), color, is_stroked);
   entity.SetContents(std::move(contents));
   AddRenderEntityToCurrentPass(entity);
 
@@ -941,8 +948,7 @@ bool Canvas::AttemptDrawLineSDF(const Point& p0,
   // Draw the line as a filled rectangle with width=line_length and
   // height=stroke_width.
 
-  Paint rect_paint = paint;
-  rect_paint.style = Paint::Style::kFill;
+  Scalar coverage_scale = 1.0f;
 
   Scalar line_length = p0.GetDistance(p1);
   if (line_length == 0.0f && paint.stroke.cap == Cap::kButt) {
@@ -983,35 +989,36 @@ bool Canvas::AttemptDrawLineSDF(const Point& p0,
 
   // Expand rect to 1 pixel minimum dimensions if applicable.
   if (!GetCurrentTransform().HasPerspective2D()) {
-    auto [expanded, alpha_scaled_color] = ExpandRectToPixelMinimum(
-        rect, paint.color, GetCurrentTransform() * rect_to_line_transform,
+    auto [expanded, area_ratio] = ExpandRectToPixelMinimum(
+        rect, GetCurrentTransform() * rect_to_line_transform,
         // Don't scale alpha when stroke width is 0. This draws a hairline that
         // is always 1 pixel regardless of the transform.
-        /*scale_alpha=*/paint.stroke.width != 0.0f);
+        /*scale_coverage=*/paint.stroke.width != 0.0f);
 
     if (expanded.IsEmpty()) {
       // Line is invisible due to transform scaling or alpha scaling.
       return true;
     }
 
-    rect_paint.color = alpha_scaled_color;
+    coverage_scale = area_ratio;
     rect = expanded;
   }
 
   UberSDFParameters params;
   if (paint.stroke.cap == Cap::kRound) {
     params = UberSDFParameters::MakeRoundedRect(
-        /*color=*/rect_paint.color,
+        /*color=*/paint.color,
         /*rect=*/rect,
         /*radii=*/
         RoundingRadii::MakeRadius(rect.GetHeight() * 0.5f),
         /*stroke=*/std::nullopt);
   } else {
     params = UberSDFParameters::MakeRect(
-        /*color=*/rect_paint.color,
+        /*color=*/paint.color,
         /*rect=*/rect,
         /*stroke=*/std::nullopt);
   }
+  params.coverage_scale = coverage_scale;
   AddRenderSDFEntityToCurrentPass(paint, params, reuse_depth,
                                   /*shape_transform=*/rect_to_line_transform);
   return true;
@@ -1076,13 +1083,13 @@ void Canvas::DrawRect(const Rect& rect, const Paint& paint) {
   if (renderer_.GetContext()->GetFlags().use_sdfs &&
       IsCompatibleWithSDFRendering(paint, GetCurrentTransform())) {
     Rect effective_rect = rect;
-    Color effective_color = paint.color;
+    Scalar coverage_scale = 1.0f;
 
     // Expand rect to 1 pixel minimum dimensions if applicable.
     if (paint.style == Paint::Style::kFill &&
         !GetCurrentTransform().HasPerspective2D()) {
-      auto [expanded, alpha_scaled_color] = ExpandRectToPixelMinimum(
-          rect, paint.color, GetCurrentTransform(), /*scale_alpha=*/true);
+      auto [expanded, area_ratio] = ExpandRectToPixelMinimum(
+          rect, GetCurrentTransform(), /*scale_coverage=*/true);
 
       if (expanded.IsEmpty()) {
         // Rect is invisible due to transform scaling or alpha scaling.
@@ -1090,13 +1097,14 @@ void Canvas::DrawRect(const Rect& rect, const Paint& paint) {
       }
 
       effective_rect = expanded;
-      effective_color = alpha_scaled_color;
+      coverage_scale = area_ratio;
     }
 
     auto params = UberSDFParameters::MakeRect(
-        /*color=*/effective_color,
+        /*color=*/paint.color,
         /*rect=*/effective_rect,
         /*stroke=*/paint.GetStroke());
+    params.coverage_scale = coverage_scale;
     AddRenderSDFEntityToCurrentPass(paint, params);
     return;
   }
@@ -1115,12 +1123,7 @@ void Canvas::DrawRect(const Rect& rect, const Paint& paint) {
 }
 
 void Canvas::DrawOval(const Rect& rect, const Paint& paint) {
-  // TODO(jonahwilliams): This additional condition avoids an assert in the
-  // stroke circle geometry generator. I need to verify the condition that this
-  // assert prevents.
-  if (rect.IsSquare() && (paint.style == Paint::Style::kFill ||
-                          (paint.style == Paint::Style::kStroke &&
-                           paint.stroke.width < rect.GetWidth()))) {
+  if (CanDrawOvalAsCircle(rect, paint)) {
     // Circles have slightly less overhead and can do stroking
     DrawCircle(rect.GetCenter(), rect.GetWidth() * 0.5f, paint);
     return;
@@ -1181,6 +1184,10 @@ void Canvas::DrawArc(const Arc& arc, const Paint& paint) {
   }
 
   const Rect& oval_bounds = arc.GetOvalBounds();
+  if (CanDrawArcAsOval(arc, paint)) {
+    DrawOval(oval_bounds, paint);
+    return;
+  }
   if (paint.stroke.width > oval_bounds.GetSize().MaxDimension()) {
     // This is a special case for rendering arcs whose stroke width is so large
     // you are effectively drawing a sector of a circle.
@@ -1201,10 +1208,6 @@ void Canvas::DrawArc(const Arc& arc, const Paint& paint) {
   //   boundary circle, as if the slice were cut, but not extracted
   //   (hard to express as a continuous kTriangleStrip).
   if (!arc.IncludeCenter()) {
-    if (arc.IsFullCircle()) {
-      return DrawOval(oval_bounds, paint);
-    }
-
     // Our fast stroking code only works for circular bounds as it assumes
     // that the inner and outer radii can be scaled along each angular step
     // of the arc - which is not true for elliptical arcs where the inner
@@ -1237,14 +1240,14 @@ void Canvas::DrawRoundRect(const RoundRect& round_rect, const Paint& paint) {
   if (renderer_.GetContext()->GetFlags().use_sdfs &&
       IsCompatibleWithSDFRendering(paint, GetCurrentTransform()) &&
       radii.AreAllCornersCircular()) {
-    Color effective_color = paint.color;
+    Scalar coverage_scale = 1.0f;
     Rect bounds = round_rect.GetBounds();
 
     // Expand rrect bounds to 1 pixel minimum dimensions if applicable.
     if (paint.style == Paint::Style::kFill &&
         !GetCurrentTransform().HasPerspective2D()) {
-      auto [expanded, alpha_scaled_color] = ExpandRectToPixelMinimum(
-          bounds, paint.color, GetCurrentTransform(), /*scale_alpha=*/true);
+      auto [expanded, area_ratio] = ExpandRectToPixelMinimum(
+          bounds, GetCurrentTransform(), /*scale_coverage=*/true);
 
       if (expanded.IsEmpty()) {
         // RRect is invisible due to transform scaling or alpha scaling.
@@ -1252,16 +1255,17 @@ void Canvas::DrawRoundRect(const RoundRect& round_rect, const Paint& paint) {
       }
 
       bounds = expanded;
-      effective_color = alpha_scaled_color;
+      coverage_scale = area_ratio;
     }
 
     auto params = UberSDFParameters::MakeRoundedRect(
-        /*color=*/effective_color,
+        /*color=*/paint.color,
         /*rect=*/bounds,
         /*radii=*/radii,
         /*stroke=*/paint.style == Paint::Style::kStroke
             ? std::make_optional(paint.stroke)
             : std::nullopt);
+    params.coverage_scale = coverage_scale;
     AddRenderSDFEntityToCurrentPass(paint, params);
     return;
   }
@@ -1329,7 +1333,7 @@ void Canvas::DrawRoundSuperellipse(const RoundSuperellipse& round_superellipse,
     if (params) {
       AddRenderSDFEntityToCurrentPass(paint, *params);
       return;
-    } else {
+    } else if (paint.blend_mode != BlendMode::kSrc) {
       // Fall back to ComplexRoundSuperellipse.
       auto contents = ComplexRoundedSuperellipseContents::Make(
           /*color=*/paint.color_source ? Color::White() : paint.color,
@@ -1749,10 +1753,11 @@ void Canvas::SetupRenderPass() {
   // a second save layer with the same dimensions as the onscreen. When
   // rendering is completed, we must blit this saveLayer to the onscreen.
   if (requires_readback_) {
-    auto entity_pass_target =
-        CreateRenderTarget(renderer_,                  //
-                           color0.texture->GetSize(),  //
-                           /*clear_color=*/Color::BlackTransparent());
+    auto entity_pass_target = CreateRenderTarget(
+        renderer_,                  //
+        color0.texture->GetSize(),  //
+        /*clear_color=*/Color::BlackTransparent(),
+        requires_coverage_readback_ ? &render_target_ : nullptr);
     render_passes_.push_back(
         LazyRenderingConfig(renderer_, std::move(entity_pass_target)));
   } else {
@@ -1944,10 +1949,12 @@ void Canvas::SaveLayer(const Paint& paint,
       // The onscreen texture can be flipped to if:
       // 1. The device supports framebuffer fetch
       // 2. There are no more backdrop filters
-      // 3. The current render pass is for the onscreen pass.
+      // 3. The current render pass is for the onscreen pass and no coverage
+      //    blend needs its readable backing texture.
       const bool should_use_onscreen =
           renderer_.GetDeviceCapabilities().SupportsFramebufferFetch() &&
-          backdrop_count_ == 0 && render_passes_.size() == 1u;
+          !requires_coverage_readback_ && backdrop_count_ == 0 &&
+          render_passes_.size() == 1u;
       input_texture = FlipBackdrop(
           GetGlobalPassPosition(),                                //
           /*should_remove_texture=*/will_cache_backdrop_texture,  //
@@ -2273,9 +2280,11 @@ void Canvas::DrawTextFrame(const std::shared_ptr<TextFrame>& text_frame,
   text_contents->SetPosition(position);
   text_contents->SetScreenTransform(GetCurrentTransform());
   text_contents->SetForceTextColor(paint.mask_blur_descriptor.has_value());
-  text_contents->SetColor(paint.color);
-  text_contents->SetTextProperties(paint.color, paint.GetStroke());
-
+  const bool uses_glyph_coverage = paint.UsesGlyphCoverageForSrc(*text_frame);
+  const Color ink =
+      uses_glyph_coverage ? paint.FilterColor(paint.color) : paint.color;
+  text_contents->SetColor(ink);
+  text_contents->SetTextProperties(ink, paint.GetStroke());
   entity.SetTransform(GetCurrentTransform().Translate(position));
 
   if (AttemptBlurredTextOptimization(text_frame, text_contents, entity,
@@ -2283,6 +2292,12 @@ void Canvas::DrawTextFrame(const std::shared_ptr<TextFrame>& text_frame,
     return;
   }
 
+  if (uses_glyph_coverage) {
+    text_contents->SetUsesGlyphCoverageForBlend(true);
+    entity.SetContents(text_contents);
+    AddRenderEntityToCurrentPass(entity);
+    return;
+  }
   entity.SetContents(paint.WithFilters(renderer_, std::move(text_contents)));
   AddRenderEntityToCurrentPass(entity, false);
 }
@@ -2300,6 +2315,19 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
   Entity entity;
   entity.SetTransform(transform);
   entity.SetBlendMode(paint.blend_mode);
+
+  if (paint.UsesSolidCoverageForSrc()) {
+    params.color = paint.FilterColor(params.color);
+    auto geometry = std::make_unique<UberSDFGeometry>(params);
+    entity.SetContents(UberSDFContents::Make(params, std::move(geometry)));
+    AddRenderEntityToCurrentPass(entity, reuse_depth);
+    return;
+  }
+
+  // Preserve how legacy SDF draws apply filters to their expanded shapes.
+  params.color =
+      params.color.WithAlpha(params.color.alpha * params.coverage_scale);
+  params.coverage_scale = 1.0f;
 
   if (paint.color_source) {
     params.gradient = CreateUberSDFGradientParameters(
@@ -2428,6 +2456,105 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
   AddRenderEntityToCurrentPass(entity, reuse_depth);
 }
 
+bool Canvas::DrawWithCoverageBackdrop(Rect bounds,
+                                      uint32_t clip_depth,
+                                      DrawWithBlendBackdrop draw) {
+  const auto clip = clip_coverage_stack_.CurrentClipCoverage();
+  if (!clip) {
+    return true;
+  }
+  const auto& target =
+      render_passes_.back().GetEntityPassTarget()->GetRenderTarget();
+  const auto region =
+      IRect::RoundOut(
+          bounds.IntersectionOrEmpty(clip->Shift(-GetGlobalPassPosition())))
+          .Intersection(IRect::MakeSize(target.GetRenderTargetSize()));
+  if (!region) {
+    return true;
+  }
+
+  const auto attachment = target.GetColorAttachment(0);
+  // Single-sample passes load the same color texture. Metal can also resume
+  // with the same resolve texture, which must not be sampled while attached.
+  const bool needs_copy =
+      !attachment.resolve_texture ||
+      renderer_.GetDeviceCapabilities().SupportsReadFromResolve();
+  std::shared_ptr<Texture> copy;
+  const auto previous = FlipBackdrop(
+      GetGlobalPassPosition(), false, false, /*next_draw_depth=*/clip_depth,
+      [&](const std::shared_ptr<Texture>& backdrop) {
+        if (!needs_copy) {
+          return true;
+        }
+        copy = CopyBackdropRegion(backdrop, *region);
+        return copy != nullptr;
+      });
+  if (!previous) {
+    return false;
+  }
+  auto& pass = GetCurrentRenderPass();
+  SetClipScissor(clip, pass, GetGlobalPassPosition());
+  const auto sampler =
+      renderer_.GetContext()->GetSamplerLibrary()->GetSampler({});
+  if (copy) {
+    return draw(pass, {std::move(copy),
+                       Rect::MakeLTRB(region->GetLeft(), region->GetTop(),
+                                      region->GetRight(), region->GetBottom()),
+                       sampler});
+  }
+  const auto restarted = pass.GetRenderTarget().GetColorAttachment(0);
+  FML_DCHECK(previous != restarted.texture &&
+             previous != restarted.resolve_texture);
+  return draw(pass, {previous, Rect::MakeSize(previous->GetSize()), sampler});
+}
+
+std::shared_ptr<Texture> Canvas::CopyBackdropRegion(
+    const std::shared_ptr<Texture>& backdrop,
+    IRect region) {
+  const auto command_buffer = renderer_.GetContext()->CreateCommandBuffer();
+  if (!command_buffer) {
+    return nullptr;
+  }
+  const auto copy_target = renderer_.GetRenderTargetCache()->CreateOffscreen(
+      *renderer_.GetContext(), region.GetSize(), 1, "Coverage backdrop",
+      RenderTarget::kDefaultColorAttachmentConfig, std::nullopt, nullptr,
+      nullptr, backdrop->GetTextureDescriptor().format);
+  if (!copy_target.IsValid()) {
+    return nullptr;
+  }
+  if (renderer_.GetDeviceCapabilities().SupportsTextureToTextureBlits()) {
+    const auto blit = command_buffer->CreateBlitPass();
+    if (!blit ||
+        !blit->AddCopy(backdrop, copy_target.GetRenderTargetTexture(), region,
+                       {}, "Copy coverage backdrop") ||
+        !blit->EncodeCommands()) {
+      return nullptr;
+    }
+  } else {
+    const auto copy = renderer_.MakeSubpass(
+        "Copy coverage backdrop", copy_target, command_buffer,
+        [&](const ContentContext& renderer, RenderPass& copy_pass) {
+          auto contents =
+              TextureContents::MakeRect(Rect::MakeSize(region.GetSize()));
+          contents->SetSourceRect(
+              Rect::MakeLTRB(region.GetLeft(), region.GetTop(),
+                             region.GetRight(), region.GetBottom()));
+          contents->SetTexture(backdrop);
+          Entity entity;
+          entity.SetContents(std::move(contents));
+          entity.SetBlendMode(BlendMode::kSrc);
+          return entity.Render(renderer, copy_pass);
+        });
+    if (!copy.ok()) {
+      return nullptr;
+    }
+  }
+  if (!renderer_.GetContext()->EnqueueCommandBuffer(command_buffer)) {
+    return nullptr;
+  }
+  return copy_target.GetRenderTargetTexture();
+}
+
 void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
   if (IsSkipping()) {
     return;
@@ -2491,7 +2618,7 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
       auto input_texture = FlipBackdrop(GetGlobalPassPosition(),  //
                                         /*should_remove_texture=*/false,
                                         /*should_use_onscreen=*/false,
-                                        /*post_depth_increment=*/true);
+                                        /*next_draw_depth=*/current_depth_);
       if (!input_texture) {
         return;
       }
@@ -2523,6 +2650,37 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
     return;
   }
 
+  if (SupportsCoverageBlend(entity.GetBlendMode())) {
+    const auto& contents = entity.GetContents();
+    if (const auto alpha = contents->GetCoverageSourceAlpha()) {
+      const auto& device = renderer_.GetDeviceCapabilities();
+      const auto& target = result->GetRenderTarget();
+      const bool is_direct_root =
+          !requires_readback_ && render_passes_.size() == 1;
+      const auto caps = GetBlendPassCapabilities(
+          device, target,
+          is_direct_root
+              ? !NeedsCoverageReadbackTarget(device, target, is_onscreen_)
+              : CanSampleBlendBackdrop(target));
+      if (const auto plan =
+              ResolveCoverageBlendPlan(entity.GetBlendMode(), *alpha, caps)) {
+        const auto prepare = [&](Rect bounds, DrawWithBlendBackdrop draw) {
+          return DrawWithCoverageBackdrop(bounds, entity.GetClipDepth(), draw);
+        };
+        // Copy draws can end this pass while the material is still recording.
+        const auto pass = result;
+        if (!contents->RenderWithCoverageBlend(renderer_, entity, *pass,
+                                               {*plan, prepare})) {
+          VALIDATION_LOG << "Failed to render coverage blend.";
+        }
+        return;
+      }
+      // A caller providing only an unsampleable pass can still issue its
+      // regular draw. DisplayList rendering prepares a readback target when
+      // the planner needs a copy.
+      FML_DLOG(WARNING) << "No coverage blend available for the render pass.";
+    }
+  }
   entity.Render(renderer_, *result);
 }
 
@@ -2537,10 +2695,13 @@ void Canvas::SetBackdropData(
   backdrop_count_ = backdrop_count;
 }
 
-std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
-                                              bool should_remove_texture,
-                                              bool should_use_onscreen,
-                                              bool post_depth_increment) {
+std::shared_ptr<Texture> Canvas::FlipBackdrop(
+    Point global_pass_position,
+    bool should_remove_texture,
+    bool should_use_onscreen,
+    std::optional<uint64_t> next_draw_depth,
+    std::optional<absl::FunctionRef<bool(const std::shared_ptr<Texture>&)>>
+        before_restart) {
   LazyRenderingConfig rendering_config = std::move(render_passes_.back());
   render_passes_.pop_back();
 
@@ -2568,7 +2729,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
     return nullptr;
   }
 
-  const std::shared_ptr<Texture>& input_texture =
+  const std::shared_ptr<Texture> input_texture =
       rendering_config.GetInlinePassContext()->GetTexture();
 
   if (!input_texture) {
@@ -2580,6 +2741,9 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
     return nullptr;
   }
 
+  // Encode copies while no render pass is recording. A copy may change the
+  // attachment's layout, which the continuation reads when it is created.
+  const bool prepared = !before_restart || (*before_restart)(input_texture);
   if (should_use_onscreen) {
     ColorAttachment color0 = render_target_.GetColorAttachment(0);
     // When MSAA is being used, we end up overriding the entire backdrop by
@@ -2606,8 +2770,12 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
       render_passes_.back().GetEntityPassTarget()->RemoveSecondary();
     }
   }
-  RenderPass& current_render_pass =
-      *render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  const auto& pass =
+      render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  if (!pass) {
+    return nullptr;
+  }
+  RenderPass& current_render_pass = *pass;
 
   // If the current pass already contains the backdrop, which only happens when
   // MSAA is not available, the eager restore below is unnecessary and would
@@ -2648,10 +2816,10 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
   // Restore any clips that were recorded before the backdrop filter was
   // applied.
   auto& replay_entities = clip_coverage_stack_.GetReplayEntities();
-  uint64_t current_depth =
-      post_depth_increment ? current_depth_ - 1 : current_depth_;
+  const uint64_t min_replay_depth =
+      next_draw_depth.value_or(current_depth_ + 1);
   for (const auto& replay : replay_entities) {
-    if (replay.clip_depth <= current_depth) {
+    if (replay.clip_depth < min_replay_depth) {
       continue;
     }
 
@@ -2663,7 +2831,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
     }
   }
 
-  return input_texture;
+  return prepared ? input_texture : nullptr;
 }
 
 bool Canvas::SupportsBlitToOnscreen() const {
@@ -2782,9 +2950,10 @@ bool Canvas::IsCompatibleWithSDFRendering(const Paint& paint,
     return false;
   }
   switch (paint.blend_mode) {
+    case BlendMode::kSrc:
+      return paint.UsesSolidCoverageForSrc();
     // Incompatible blend modes:
     case BlendMode::kClear:
-    case BlendMode::kSrc:
     case BlendMode::kSrcIn:
     case BlendMode::kDstIn:
     case BlendMode::kSrcOut:
@@ -2816,6 +2985,19 @@ bool Canvas::IsCompatibleWithSDFRendering(const Paint& paint,
     case BlendMode::kLuminosity:
       return true;
   }
+}
+
+bool Canvas::CanDrawOvalAsCircle(const Rect& rect, const Paint& paint) {
+  // The stroke width limit avoids an assertion in the circle generator.
+  return rect.IsSquare() && (paint.style == Paint::Style::kFill ||
+                             (paint.style == Paint::Style::kStroke &&
+                              paint.stroke.width < rect.GetWidth()));
+}
+
+bool Canvas::CanDrawArcAsOval(const Arc& arc, const Paint& paint) {
+  return paint.style == Paint::Style::kStroke && !arc.IncludeCenter() &&
+         arc.IsFullCircle() &&
+         paint.stroke.width <= arc.GetOvalSize().MaxDimension();
 }
 
 LazyRenderingConfig::LazyRenderingConfig(

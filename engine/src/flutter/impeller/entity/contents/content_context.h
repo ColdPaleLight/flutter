@@ -16,6 +16,7 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/host_buffer.h"
+#include "impeller/entity/contents/blend_plan.h"
 #include "impeller/entity/contents/text_shadow_cache.h"
 #include "impeller/geometry/color.h"
 #include "impeller/renderer/capabilities.h"
@@ -28,16 +29,7 @@
 #include "third_party/abseil-cpp/absl/status/statusor.h"
 
 namespace impeller {
-/// Pipeline state configuration.
-///
-/// Each unique combination of these options requires a different pipeline state
-/// object to be built. This struct is used as a key for the per-pipeline
-/// variant cache.
-///
-/// When adding fields to this key, reliant features should take care to limit
-/// the combinatorical explosion of variations. A sufficiently complicated
-/// Flutter application may easily require building hundreds of PSOs in total,
-/// but they shouldn't require e.g. 10s of thousands.
+/// Options used to configure a shader family's pipeline variants.
 struct ContentContextOptions {
   enum class StencilMode : uint8_t {
     /// Turn the stencil test off. Used when drawing without stencil-then-cover.
@@ -84,30 +76,44 @@ struct ContentContextOptions {
   bool has_depth_stencil_attachments = true;
   bool depth_write_enabled = false;
   bool is_for_rrect_blur_clear = false;
+  // Draws that resolve their blend state together with the shader outputs
+  // supply that state here. The render pass still supplies the format.
+  std::optional<ColorAttachmentDescriptor> blend_state;
 
-  constexpr uint64_t ToKey() const {
-    static_assert(sizeof(sample_count) == 1);
-    static_assert(sizeof(blend_mode) == 1);
+  struct Key {
+    uint64_t raster_state;
+    ColorAttachmentDescriptor color_attachment;
+
+    bool operator==(const Key&) const = default;
+
+    size_t Hash() const {
+      return fml::HashCombine(raster_state, color_attachment.Hash());
+    }
+  };
+
+  Key ToKey() const {
     static_assert(sizeof(sample_count) == 1);
     static_assert(sizeof(depth_compare) == 1);
     static_assert(sizeof(stencil_mode) == 1);
     static_assert(sizeof(primitive_type) == 1);
-    static_assert(sizeof(color_attachment_pixel_format) == 1);
 
-    return (is_for_rrect_blur_clear ? 1llu : 0llu) << 0 |
-           (0) << 1 |  // // Unused, previously wireframe.
-           (has_depth_stencil_attachments ? 1llu : 0llu) << 2 |
-           (depth_write_enabled ? 1llu : 0llu) << 3 |
-           // enums
-           static_cast<uint64_t>(color_attachment_pixel_format) << 8 |
-           static_cast<uint64_t>(primitive_type) << 16 |
-           static_cast<uint64_t>(stencil_mode) << 24 |
-           static_cast<uint64_t>(depth_compare) << 32 |
-           static_cast<uint64_t>(blend_mode) << 40 |
-           static_cast<uint64_t>(sample_count) << 48;
+    const uint64_t raster_state =
+        (has_depth_stencil_attachments ? 1ull : 0ull) |
+        (depth_write_enabled ? 1ull : 0ull) << 1 |
+        static_cast<uint64_t>(primitive_type) << 8 |
+        static_cast<uint64_t>(stencil_mode) << 16 |
+        static_cast<uint64_t>(depth_compare) << 24 |
+        static_cast<uint64_t>(sample_count) << 32;
+    return {raster_state, ResolveColorAttachment()};
   }
 
   void ApplyToPipelineDescriptor(PipelineDescriptor& desc) const;
+  void ApplyToPipelineDescriptor(
+      PipelineDescriptor& desc,
+      const ColorAttachmentDescriptor& color_attachment) const;
+
+ private:
+  ColorAttachmentDescriptor ResolveColorAttachment() const;
 };
 
 enum ConicalKind {
@@ -149,7 +155,10 @@ class ContentContext {
   PipelineRef GetBlendSaturationPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendSoftLightPipeline(ContentContextOptions opts) const;
-  PipelineRef GetCirclePipeline(ContentContextOptions opts) const;
+  PipelineRef GetCirclePipeline(
+      ContentContextOptions opts,
+      BlendPlan::ShaderVariant variant =
+          BlendPlan::ShaderVariant::kSingleSource) const;
   PipelineRef GetClipPipeline(ContentContextOptions opts) const;
   PipelineRef GetColorMatrixColorFilterPipeline(ContentContextOptions opts) const;
   PipelineRef GetConicalGradientFillPipeline(ContentContextOptions opts, ConicalKind kind) const;
@@ -176,7 +185,10 @@ class ContentContext {
   PipelineRef GetFramebufferBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendSoftLightPipeline(ContentContextOptions opts) const;
   PipelineRef GetGaussianBlurPipeline(ContentContextOptions opts) const;
-  PipelineRef GetGlyphAtlasPipeline(ContentContextOptions opts) const;
+  PipelineRef GetGlyphAtlasPipeline(
+      ContentContextOptions opts,
+      BlendPlan::ShaderVariant variant =
+          BlendPlan::ShaderVariant::kSingleSource) const;
   PipelineRef GetLinearGradientFillPipeline(ContentContextOptions opts) const;
   PipelineRef GetLinearGradientSSBOFillPipeline(ContentContextOptions opts) const;
   PipelineRef GetLinearGradientUniformFillPipeline(ContentContextOptions opts) const;
@@ -197,8 +209,10 @@ class ContentContext {
   PipelineRef GetTextureStrictSrcPipeline(ContentContextOptions opts) const;
   PipelineRef GetTiledTexturePipeline(ContentContextOptions opts) const;
   PipelineRef GetYUVToRGBFilterPipeline(ContentContextOptions opts) const;
-  PipelineRef GetUberSDFPipeline(ContentContextOptions opts) const;
-  PipelineRef GetUberSDFSSBOPipeline(ContentContextOptions opts) const;
+  PipelineRef GetUberSDFPipeline(
+      ContentContextOptions opts,
+      BlendPlan::ShaderVariant variant =
+          BlendPlan::ShaderVariant::kSingleSource) const;
   PipelineRef GetComplexRSEPipeline(ContentContextOptions opts) const;
 #ifdef IMPELLER_ENABLE_OPENGLES
 #if !defined(FML_OS_EMSCRIPTEN)
@@ -335,12 +349,11 @@ class ContentContext {
 
   struct RuntimeEffectPipelineKey {
     std::string unique_entrypoint_name;
-    ContentContextOptions options;
+    ContentContextOptions::Key options;
 
     struct Hash {
       std::size_t operator()(const RuntimeEffectPipelineKey& key) const {
-        return fml::HashCombine(key.unique_entrypoint_name,
-                                key.options.ToKey());
+        return fml::HashCombine(key.unique_entrypoint_name, key.options.Hash());
       }
     };
 
@@ -348,7 +361,7 @@ class ContentContext {
       inline bool operator()(const RuntimeEffectPipelineKey& lhs,
                              const RuntimeEffectPipelineKey& rhs) const {
         return lhs.unique_entrypoint_name == rhs.unique_entrypoint_name &&
-               lhs.options.ToKey() == rhs.options.ToKey();
+               lhs.options == rhs.options;
       }
     };
   };

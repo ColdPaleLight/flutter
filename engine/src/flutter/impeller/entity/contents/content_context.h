@@ -76,35 +76,30 @@ struct ContentContextOptions {
   };
 
   SampleCount sample_count = SampleCount::kCount1;
-  BlendMode blend_mode = BlendMode::kSrcOver;
+  BlendState blend_state =
+      BlendState::Add(BlendFactor::kOne, BlendFactor::kOneMinusSourceAlpha);
   CompareFunction depth_compare = CompareFunction::kAlways;
   StencilMode stencil_mode = ContentContextOptions::StencilMode::kIgnore;
   PrimitiveType primitive_type = PrimitiveType::kTriangle;
   PixelFormat color_attachment_pixel_format = PixelFormat::kUnknown;
   bool has_depth_stencil_attachments = true;
   bool depth_write_enabled = false;
-  bool is_for_rrect_blur_clear = false;
 
   constexpr uint64_t ToKey() const {
-    static_assert(sizeof(sample_count) == 1);
-    static_assert(sizeof(blend_mode) == 1);
-    static_assert(sizeof(sample_count) == 1);
     static_assert(sizeof(depth_compare) == 1);
     static_assert(sizeof(stencil_mode) == 1);
     static_assert(sizeof(primitive_type) == 1);
     static_assert(sizeof(color_attachment_pixel_format) == 1);
+    static_assert(static_cast<uint8_t>(SampleCount::kCount4) < (1u << 3));
 
-    return (is_for_rrect_blur_clear ? 1llu : 0llu) << 0 |
-           (0) << 1 |  // // Unused, previously wireframe.
-           (has_depth_stencil_attachments ? 1llu : 0llu) << 2 |
-           (depth_write_enabled ? 1llu : 0llu) << 3 |
-           // enums
-           static_cast<uint64_t>(color_attachment_pixel_format) << 8 |
-           static_cast<uint64_t>(primitive_type) << 16 |
-           static_cast<uint64_t>(stencil_mode) << 24 |
-           static_cast<uint64_t>(depth_compare) << 32 |
-           static_cast<uint64_t>(blend_mode) << 40 |
-           static_cast<uint64_t>(sample_count) << 48;
+    return (has_depth_stencil_attachments ? 1llu : 0llu) |
+           (depth_write_enabled ? 1llu : 0llu) << 1 |
+           static_cast<uint64_t>(color_attachment_pixel_format) << 2 |
+           static_cast<uint64_t>(primitive_type) << 10 |
+           static_cast<uint64_t>(stencil_mode) << 18 |
+           static_cast<uint64_t>(depth_compare) << 26 |
+           static_cast<uint64_t>(sample_count) << 34 |
+           static_cast<uint64_t>(blend_state.ToKey()) << 37;
   }
 
   void ApplyToPipelineDescriptor(PipelineDescriptor& desc) const;

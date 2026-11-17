@@ -313,125 +313,27 @@ struct ContentContext::Pipelines {
   // clang-format on
 };
 
+static void ApplyBlendState(ColorAttachmentDescriptor& color,
+                            const BlendState& state) {
+  const auto& equation = state.equation;
+  color.blending_enabled = state.enabled;
+  color.src_color_blend_factor = equation.source;
+  color.dst_color_blend_factor = equation.destination;
+  color.color_blend_op = equation.operation;
+  color.src_alpha_blend_factor = equation.source;
+  color.dst_alpha_blend_factor = equation.destination;
+  color.alpha_blend_op = equation.operation;
+  color.write_mask =
+      state.write_color ? ColorWriteMaskBits::kAll : ColorWriteMaskBits::kNone;
+}
+
 void ContentContextOptions::ApplyToPipelineDescriptor(
     PipelineDescriptor& desc) const {
-  auto pipeline_blend = blend_mode;
-  if (blend_mode > Entity::kLastPipelineBlendMode) {
-    VALIDATION_LOG << "Cannot use blend mode " << static_cast<int>(blend_mode)
-                   << " as a pipeline blend.";
-    pipeline_blend = BlendMode::kSrcOver;
-  }
-
   desc.SetSampleCount(sample_count);
 
-  ColorAttachmentDescriptor color0 = *desc.GetColorAttachmentDescriptor(0u);
-  // Variants are created from the descriptor of the default variant, so reset
-  // everything that only some of the blend modes below set.
+  auto color0 = *desc.GetColorAttachmentDescriptor(0u);
   color0.format = color_attachment_pixel_format;
-  color0.blending_enabled = true;
-  color0.alpha_blend_op = BlendOperation::kAdd;
-  color0.color_blend_op = BlendOperation::kAdd;
-  color0.write_mask = ColorWriteMaskBits::kAll;
-
-  switch (pipeline_blend) {
-    case BlendMode::kClear:
-      if (is_for_rrect_blur_clear) {
-        color0.alpha_blend_op = BlendOperation::kReverseSubtract;
-        color0.color_blend_op = BlendOperation::kReverseSubtract;
-        color0.dst_alpha_blend_factor = BlendFactor::kOne;
-        color0.dst_color_blend_factor = BlendFactor::kOne;
-        color0.src_alpha_blend_factor = BlendFactor::kDestinationColor;
-        color0.src_color_blend_factor = BlendFactor::kDestinationColor;
-      } else {
-        color0.dst_alpha_blend_factor = BlendFactor::kZero;
-        color0.dst_color_blend_factor = BlendFactor::kZero;
-        color0.src_alpha_blend_factor = BlendFactor::kZero;
-        color0.src_color_blend_factor = BlendFactor::kZero;
-      }
-      break;
-    case BlendMode::kSrc:
-      color0.blending_enabled = false;
-      color0.dst_alpha_blend_factor = BlendFactor::kZero;
-      color0.dst_color_blend_factor = BlendFactor::kZero;
-      color0.src_alpha_blend_factor = BlendFactor::kOne;
-      color0.src_color_blend_factor = BlendFactor::kOne;
-      break;
-    case BlendMode::kDst:
-      color0.dst_alpha_blend_factor = BlendFactor::kOne;
-      color0.dst_color_blend_factor = BlendFactor::kOne;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      color0.write_mask = ColorWriteMaskBits::kNone;
-      break;
-    case BlendMode::kSrcOver:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kOne;
-      color0.src_color_blend_factor = BlendFactor::kOne;
-      break;
-    case BlendMode::kDstOver:
-      color0.dst_alpha_blend_factor = BlendFactor::kOne;
-      color0.dst_color_blend_factor = BlendFactor::kOne;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kSrcIn:
-      color0.dst_alpha_blend_factor = BlendFactor::kZero;
-      color0.dst_color_blend_factor = BlendFactor::kZero;
-      color0.src_alpha_blend_factor = BlendFactor::kDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kDestinationAlpha;
-      break;
-    case BlendMode::kDstIn:
-      color0.dst_alpha_blend_factor = BlendFactor::kSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      break;
-    case BlendMode::kSrcOut:
-      color0.dst_alpha_blend_factor = BlendFactor::kZero;
-      color0.dst_color_blend_factor = BlendFactor::kZero;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kDstOut:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      break;
-    case BlendMode::kSrcATop:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kDestinationAlpha;
-      break;
-    case BlendMode::kDstATop:
-      color0.dst_alpha_blend_factor = BlendFactor::kSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kXor:
-      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceAlpha;
-      color0.src_alpha_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      color0.src_color_blend_factor = BlendFactor::kOneMinusDestinationAlpha;
-      break;
-    case BlendMode::kPlus:
-      color0.dst_alpha_blend_factor = BlendFactor::kOne;
-      color0.dst_color_blend_factor = BlendFactor::kOne;
-      color0.src_alpha_blend_factor = BlendFactor::kOne;
-      color0.src_color_blend_factor = BlendFactor::kOne;
-      break;
-    case BlendMode::kModulate:
-      color0.dst_alpha_blend_factor = BlendFactor::kSourceAlpha;
-      color0.dst_color_blend_factor = BlendFactor::kSourceColor;
-      color0.src_alpha_blend_factor = BlendFactor::kZero;
-      color0.src_color_blend_factor = BlendFactor::kZero;
-      break;
-    default:
-      FML_UNREACHABLE();
-  }
+  ApplyBlendState(color0, blend_state);
   desc.SetColorAttachmentDescriptor(0u, color0);
 
   if (!has_depth_stencil_attachments) {
@@ -560,7 +462,7 @@ ContentContext::CreateDefaultPipelines(const Context& context) {
   // `ColorSourceContents::DrawGeometry`).
   const auto options_opaque_trianglestrip = ContentContextOptions{
       .sample_count = pass_sample_count,
-      .blend_mode = BlendMode::kSrc,
+      .blend_state = {},
       .depth_compare = CompareFunction::kGreaterEqual,
       .primitive_type = PrimitiveType::kTriangleStrip,
       .color_attachment_pixel_format = default_color_format,
@@ -575,7 +477,7 @@ ContentContext::CreateDefaultPipelines(const Context& context) {
   // The same, for filters that overwrite their subpass with `kSrc`.
   const auto options_no_msaa_no_depth_stencil_src = ContentContextOptions{
       .sample_count = SampleCount::kCount1,
-      .blend_mode = BlendMode::kSrc,
+      .blend_state = {},
       .depth_compare = CompareFunction::kGreaterEqual,
       .primitive_type = PrimitiveType::kTriangleStrip,
       .color_attachment_pixel_format = default_color_format,
@@ -584,7 +486,7 @@ ContentContext::CreateDefaultPipelines(const Context& context) {
   // `kSrc`, see `FramebufferBlendContents`.
   const auto options_framebuffer_blend = ContentContextOptions{
       .sample_count = pass_sample_count,
-      .blend_mode = BlendMode::kSrc,
+      .blend_state = {},
       .depth_compare = CompareFunction::kGreaterEqual,
       .primitive_type = PrimitiveType::kTriangleStrip,
       .color_attachment_pixel_format = default_color_format};
@@ -674,7 +576,7 @@ ContentContext::CreateDefaultPipelines(const Context& context) {
     // draw, which writes depth outside the clip shape.
     const auto clip_options = ContentContextOptions{
         .sample_count = pass_sample_count,
-        .blend_mode = BlendMode::kDst,
+        .blend_state = BlendState::FromBlendMode(BlendMode::kDst),
         .depth_compare = CompareFunction::kGreaterEqual,
         .stencil_mode =
             ContentContextOptions::StencilMode::kCoverCompareInverted,

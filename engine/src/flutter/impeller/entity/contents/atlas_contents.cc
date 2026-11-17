@@ -181,7 +181,7 @@ bool AtlasContents::Render(const ContentContext& renderer,
     auto pipeline_options = OptionsFromPassAndEntity(pass, entity);
     pipeline_options.primitive_type = PrimitiveType::kTriangle;
     pipeline_options.depth_write_enabled =
-        pipeline_options.blend_mode == BlendMode::kSrc;
+        entity.GetBlendMode() == BlendMode::kSrc;
 
     pass.SetPipeline(renderer.GetTexturePipeline(pipeline_options));
     pass.SetVertexBuffer(geometry_->CreateSimpleVertexBuffer(data_host_buffer));

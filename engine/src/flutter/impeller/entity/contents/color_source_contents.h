@@ -143,7 +143,8 @@ class ColorSourceContents : public Contents {
       pass.SetVertexBuffer(std::move(stencil_geometry_result.vertex_buffer));
       options.primitive_type = stencil_geometry_result.type;
 
-      options.blend_mode = BlendMode::kDst;
+      const auto blend_state = options.blend_state;
+      options.blend_state = BlendState::FromBlendMode(BlendMode::kDst);
       switch (stencil_geometry_result.mode) {
         case GeometryResult::Mode::kNonZero:
           pass.SetCommandLabel("Stencil preparation (NonZero)");
@@ -178,7 +179,7 @@ class ColorSourceContents : public Contents {
 
       /// Cover draw.
 
-      options.blend_mode = entity.GetBlendMode();
+      options.blend_state = blend_state;
       options.stencil_mode = ContentContextOptions::StencilMode::kCoverCompare;
       std::optional<Rect> maybe_cover_area = geometry->GetCoverage({});
       if (!maybe_cover_area.has_value()) {
@@ -205,7 +206,7 @@ class ColorSourceContents : public Contents {
     // Enable depth writing for all opaque entities in order to allow
     // reordering. Opaque entities are coerced to source blending by
     // `EntityPass::AddEntity`.
-    options.depth_write_enabled = options.blend_mode == BlendMode::kSrc;
+    options.depth_write_enabled = entity.GetBlendMode() == BlendMode::kSrc;
 
     // Take the pre-populated vertex shader uniform struct and set managed
     // values.

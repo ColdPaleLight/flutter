@@ -209,7 +209,7 @@ static std::optional<Entity> AdvancedBlend(
 
     auto options = OptionsFromPass(pass);
     options.primitive_type = PrimitiveType::kTriangleStrip;
-    options.blend_mode = BlendMode::kSrc;
+    options.blend_state = {};
     PipelineRef pipeline = std::invoke(pipeline_proc, renderer, options);
 
 #ifdef IMPELLER_DEBUG
@@ -602,7 +602,7 @@ static std::optional<Entity> PipelineBlend(
     };
 
     // Draw the first texture using kSource.
-    options.blend_mode = BlendMode::kSrc;
+    options.blend_state = {};
     pass.SetPipeline(renderer.GetTexturePipeline(options));
     if (!add_blend_command(dst_snapshot)) {
       return true;
@@ -611,7 +611,7 @@ static std::optional<Entity> PipelineBlend(
     // Write subsequent textures using the selected blend mode.
 
     if (inputs.size() >= 2) {
-      options.blend_mode = blend_mode;
+      options.blend_state = BlendState::FromBlendMode(blend_mode);
       pass.SetPipeline(renderer.GetTexturePipeline(options));
 
       for (auto texture_i = inputs.begin() + 1; texture_i < inputs.end();
@@ -773,7 +773,7 @@ std::optional<Entity> BlendFilterContents::CreateFramebufferAdvancedBlend(
       };
 
       auto options = OptionsFromPass(pass);
-      options.blend_mode = BlendMode::kSrc;
+      options.blend_state = {};
       options.primitive_type = PrimitiveType::kTriangleStrip;
 
       pass.SetCommandLabel("Framebuffer Advanced Blend Filter");

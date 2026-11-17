@@ -128,14 +128,12 @@ enum OptionField : uint32_t {
   kFieldFormat = 1u << 5,
   kFieldDepthStencil = 1u << 6,
   kFieldDepthWrite = 1u << 7,
-  kFieldRRectBlurClear = 1u << 8,
 };
 
 /// Every field, in the order they are printed.
-constexpr std::array<OptionField, 9> kOptionFields = {
-    kFieldMsaa,         kFieldBlend,      kFieldDepth,
-    kFieldStencil,      kFieldPrimitive,  kFieldFormat,
-    kFieldDepthStencil, kFieldDepthWrite, kFieldRRectBlurClear,
+constexpr std::array<OptionField, 8> kOptionFields = {
+    kFieldMsaa,      kFieldBlend,  kFieldDepth,        kFieldStencil,
+    kFieldPrimitive, kFieldFormat, kFieldDepthStencil, kFieldDepthWrite,
 };
 
 constexpr uint32_t kAllOptionFields = (1u << kOptionFields.size()) - 1u;
@@ -158,8 +156,6 @@ std::string_view FieldName(OptionField field) {
       return "depth_stencil";
     case kFieldDepthWrite:
       return "depth_write";
-    case kFieldRRectBlurClear:
-      return "rrect_blur_clear";
   }
   FML_UNREACHABLE();
 }
@@ -167,8 +163,19 @@ std::string_view FieldName(OptionField field) {
 /// Whether `field` is a boolean, which is printed as `+name` when set and not
 /// at all otherwise.
 bool IsFlag(OptionField field) {
-  return field == kFieldDepthStencil || field == kFieldDepthWrite ||
-         field == kFieldRRectBlurClear;
+  return field == kFieldDepthStencil || field == kFieldDepthWrite;
+}
+
+std::string DescribeBlendState(const BlendState& state) {
+  const auto key = state.ToKey();
+  for (auto i = static_cast<uint8_t>(BlendMode::kClear);
+       i <= static_cast<uint8_t>(BlendMode::kModulate); ++i) {
+    const auto mode = static_cast<BlendMode>(i);
+    if (key == BlendState::FromBlendMode(mode).ToKey()) {
+      return BlendModeToString(mode);
+    }
+  }
+  return absl::StrCat("state(", key, ")");
 }
 
 std::string FieldValue(const ContentContextOptions& options,
@@ -177,7 +184,7 @@ std::string FieldValue(const ContentContextOptions& options,
     case kFieldMsaa:
       return SampleCountToString(options.sample_count);
     case kFieldBlend:
-      return BlendModeToString(options.blend_mode);
+      return DescribeBlendState(options.blend_state);
     case kFieldDepth:
       return CompareFunctionToString(options.depth_compare);
     case kFieldStencil:
@@ -190,8 +197,6 @@ std::string FieldValue(const ContentContextOptions& options,
       return options.has_depth_stencil_attachments ? "on" : "off";
     case kFieldDepthWrite:
       return options.depth_write_enabled ? "on" : "off";
-    case kFieldRRectBlurClear:
-      return options.is_for_rrect_blur_clear ? "on" : "off";
   }
   FML_UNREACHABLE();
 }

@@ -155,7 +155,7 @@ bool TextureContents::Render(const ContentContext& renderer,
   pipeline_options.primitive_type = PrimitiveType::kTriangleStrip;
 
   pipeline_options.depth_write_enabled =
-      stencil_enabled_ && pipeline_options.blend_mode == BlendMode::kSrc;
+      stencil_enabled_ && entity.GetBlendMode() == BlendMode::kSrc;
 
 #if defined(IMPELLER_ENABLE_OPENGLES) && !defined(FML_OS_EMSCRIPTEN)
   if (is_external_texture) {

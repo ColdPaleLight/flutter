@@ -13,11 +13,16 @@
 #include "display_list/geometry/dl_path_builder.h"
 #include "flutter/display_list/dl_builder.h"
 #include "flutter/fml/closure.h"
+#include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/impeller/display_list/testing/render_text_in_canvas.h"
 #include "flutter/impeller/display_list/testing/rmse.h"
 #include "flutter/testing/testing.h"
 #include "gtest/gtest.h"
+#include "impeller/display_list/dl_dispatcher.h"
+#include "impeller/renderer/blit_pass.h"
+#include "impeller/renderer/command_queue.h"
 #include "impeller/renderer/testing/mocks.h"
+#include "impeller/typographer/backends/skia/typographer_context_skia.h"
 
 namespace flutter {
 namespace testing {
@@ -680,7 +685,73 @@ MakeCapabilitiesWithoutFramebufferFetch(
   FLT_FORWARD(mock_capabilities, capabilities, GetMinimumUniformAlignment);
   return mock_capabilities;
 }
+
+constexpr impeller::ISize kBlendTestSize(128, 128);
+
+std::vector<uint8_t> ReadBlendTestTexture(
+    const std::shared_ptr<impeller::Context>& context,
+    const std::shared_ptr<impeller::Texture>& texture) {
+  if (!texture) {
+    return {};
+  }
+  const auto bytes =
+      texture->GetTextureDescriptor().GetByteSizeOfBaseMipLevel();
+  auto buffer = context->GetResourceAllocator()->CreateBuffer(
+      {.storage_mode = impeller::StorageMode::kHostVisible,
+       .size = bytes,
+       .readback = true});
+  auto command = context->CreateCommandBuffer();
+  if (!buffer || !command) {
+    return {};
+  }
+  auto blit = command->CreateBlitPass();
+  if (!blit || !blit->AddCopy(texture, buffer) || !blit->EncodeCommands()) {
+    return {};
+  }
+  fml::AutoResetWaitableEvent done;
+  if (!context->GetCommandQueue()
+           ->Submit({command},
+                    [&](impeller::CommandBuffer::Status status) {
+                      EXPECT_EQ(status,
+                                impeller::CommandBuffer::Status::kCompleted);
+                      done.Signal();
+                    })
+           .ok()) {
+    return {};
+  }
+  done.Wait();
+  buffer->Invalidate();
+  const auto* pixels = buffer->OnGetContents();
+  return {pixels, pixels + bytes};
+}
+
 }  // namespace
+
+TEST_P(DlGoldenTest, ModulateMultipliesPremultipliedColorAndAlpha) {
+  DisplayListBuilder builder;
+  builder.DrawColor(DlColor::kWhite().withAlpha(128), DlBlendMode::kSrc);
+  builder.DrawRect(DlRect::MakeXYWH(16, 16, 32, 32),
+                   DlPaint()
+                       .setAntiAlias(false)
+                       .setColor(DlColor::RGBA(1.0f, 0.5f, 0.0f, 0.5f))
+                       .setBlendMode(DlBlendMode::kModulate));
+
+  const auto context = GetContext();
+  impeller::AiksContext renderer(context,
+                                 impeller::TypographerContextSkia::Make());
+  const auto texture = impeller::DisplayListToTexture(
+      builder.Build(), kBlendTestSize, renderer, true, false,
+      impeller::PixelFormat::kR8G8B8A8UNormInt);
+  const auto pixels = ReadBlendTestTexture(context, texture);
+  ASSERT_EQ(
+      pixels.size(),
+      static_cast<size_t>(kBlendTestSize.width * kBlendTestSize.height) * 4u);
+  const size_t pixel = 4 * (32 * kBlendTestSize.width + 32);
+  EXPECT_NEAR(pixels[pixel], 64, 1);
+  EXPECT_NEAR(pixels[pixel + 1], 32, 1);
+  EXPECT_EQ(pixels[pixel + 2], 0);
+  EXPECT_NEAR(pixels[pixel + 3], 64, 1);
+}
 
 // Advanced blends on devices without framebuffer fetch are rendered in an
 // offscreen subpass whose render target has an integral size. The texture

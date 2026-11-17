@@ -40,8 +40,7 @@ PipelineDescriptor MakeDescriptor(const std::string& label) {
 /// Options that differ for each `seed`.
 ContentContextOptions MakeOptions(uint8_t seed) {
   ContentContextOptions options;
-  options.blend_mode = static_cast<BlendMode>(
-      seed % (static_cast<uint8_t>(BlendMode::kLastMode) + 1));
+  options.blend_state = BlendState::FromBlendMode(static_cast<BlendMode>(seed));
   return options;
 }
 
@@ -215,7 +214,7 @@ TEST_F(PipelineVariantRecorderTest, KeepsBackendsSeparate) {
 
 TEST_F(PipelineVariantRecorderTest, FormatsOptions) {
   ContentContextOptions options;
-  options.blend_mode = BlendMode::kPlus;
+  options.blend_state = BlendState::FromBlendMode(BlendMode::kPlus);
   options.sample_count = SampleCount::kCount4;
   options.primitive_type = PrimitiveType::kTriangleStrip;
   options.stencil_mode = ContentContextOptions::StencilMode::kCoverCompare;

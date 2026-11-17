@@ -81,7 +81,7 @@ bool ClipContents::Render(const ContentContext& renderer,
   info.mvp = clip_geometry_.transform;
 
   auto options = OptionsFromPass(pass);
-  options.blend_mode = BlendMode::kDst;
+  options.blend_state = BlendState::FromBlendMode(BlendMode::kDst);
   options.primitive_type = clip_geometry_.type;
 
   pass.SetVertexBuffer(clip_geometry_.vertex_buffer);

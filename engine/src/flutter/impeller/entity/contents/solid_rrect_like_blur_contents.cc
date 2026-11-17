@@ -139,7 +139,11 @@ bool SolidRRectLikeBlurContents::Render(const ContentContext& renderer,
   opts.primitive_type = PrimitiveType::kTriangleStrip;
   Color color = color_;
   if (entity.GetBlendMode() == BlendMode::kClear) {
-    opts.is_for_rrect_blur_clear = true;
+    // Attenuate the destination by the shader's blurred coverage.
+    opts.blend_state = {
+        .enabled = true,
+        .equation = {BlendFactor::kDestinationColor, BlendFactor::kOne,
+                     BlendOperation::kReverseSubtract}};
     color = Color::White();
   }
 

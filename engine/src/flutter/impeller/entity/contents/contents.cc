@@ -34,7 +34,7 @@ ContentContextOptions OptionsFromPass(const RenderPass& pass) {
 ContentContextOptions OptionsFromPassAndEntity(const RenderPass& pass,
                                                const Entity& entity) {
   ContentContextOptions opts = OptionsFromPass(pass);
-  opts.blend_mode = entity.GetBlendMode();
+  opts.blend_state = BlendState::FromBlendMode(entity.GetBlendMode());
   return opts;
 }
 

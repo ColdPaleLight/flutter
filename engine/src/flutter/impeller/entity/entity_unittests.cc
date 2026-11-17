@@ -820,7 +820,7 @@ TEST_P(EntityTest, BlendingModeOptions) {
 
       pass.SetCommandLabel("Blended Rectangle");
       auto options = OptionsFromPass(pass);
-      options.blend_mode = blend_mode;
+      options.blend_state = BlendState::FromBlendMode(blend_mode);
       options.primitive_type = PrimitiveType::kTriangle;
       pass.SetPipeline(context.GetSolidFillPipeline(options));
       pass.SetVertexBuffer(
@@ -2168,6 +2168,25 @@ TEST_P(EntityTest, DecalSpecializationAppliedToMorphologyFilter) {
             expected_constants);
 }
 
+TEST(BlendStateTest, PipelineKeyTracksGpuBlendState) {
+  ContentContextOptions opts;
+  const auto key = opts.ToKey();
+  opts.blend_state.equation.source = BlendFactor::kZero;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state.equation.source = BlendFactor::kOne;
+  opts.blend_state.equation.destination = BlendFactor::kOne;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state.equation.destination = BlendFactor::kOneMinusSourceAlpha;
+  opts.blend_state.equation.operation = BlendOperation::kReverseSubtract;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state.equation.operation = BlendOperation::kAdd;
+  opts.blend_state.enabled = false;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state.enabled = true;
+  opts.blend_state.write_color = false;
+  EXPECT_NE(key, opts.ToKey());
+}
+
 // This doesn't really tell you if the hashes will have frequent
 // collisions, but since this type is only used to hash a bounded
 // set of options, we can just compare benchmarks.
@@ -2175,7 +2194,7 @@ TEST_P(EntityTest, ContentContextOptionsHasReasonableHashFunctions) {
   ContentContextOptions opts;
   auto hash_a = opts.ToKey();
 
-  opts.blend_mode = BlendMode::kColorBurn;
+  opts.blend_state = BlendState::FromBlendMode(BlendMode::kPlus);
   auto hash_b = opts.ToKey();
 
   opts.has_depth_stencil_attachments = false;

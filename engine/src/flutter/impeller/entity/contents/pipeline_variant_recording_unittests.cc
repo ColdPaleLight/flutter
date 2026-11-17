@@ -52,7 +52,7 @@ ContentContextOptions MakeLazyOptions(const Context& context) {
   ContentContextOptions options;
   options.color_attachment_pixel_format =
       context.GetCapabilities()->GetDefaultColorFormat();
-  options.blend_mode = BlendMode::kXor;
+  options.blend_state = BlendState::FromBlendMode(BlendMode::kXor);
   return options;
 }
 
@@ -156,14 +156,14 @@ TEST_P(PipelineVariantRecordingTest,
       GetContext()->GetCapabilities()->GetDefaultColorFormat();
   ContentContextOptions default_solid_fill_options{
       .sample_count = pass_sample_count,
-      .blend_mode = BlendMode::kSrc,
+      .blend_state = {},
       .depth_compare = CompareFunction::kGreaterEqual,
       .primitive_type = PrimitiveType::kTriangleStrip,
       .color_attachment_pixel_format = default_color_format,
       .depth_write_enabled = true};
   ContentContextOptions default_clip_options{
       .sample_count = pass_sample_count,
-      .blend_mode = BlendMode::kDst,
+      .blend_state = BlendState::FromBlendMode(BlendMode::kDst),
       .depth_compare = CompareFunction::kGreaterEqual,
       .stencil_mode = ContentContextOptions::StencilMode::kCoverCompareInverted,
       .primitive_type = PrimitiveType::kTriangleStrip,

@@ -13,6 +13,47 @@
 
 namespace impeller {
 
+BlendState BlendState::FromBlendMode(BlendMode mode) {
+  using Factor = BlendFactor;
+  switch (mode) {
+    case BlendMode::kClear:
+      return Add(Factor::kZero, Factor::kZero);
+    case BlendMode::kSrc:
+      return {};
+    case BlendMode::kDst:
+      return {.enabled = true,
+              .equation = {Factor::kZero, Factor::kOne},
+              .write_color = false};
+    case BlendMode::kSrcOver:
+      return Add(Factor::kOne, Factor::kOneMinusSourceAlpha);
+    case BlendMode::kDstOver:
+      return Add(Factor::kOneMinusDestinationAlpha, Factor::kOne);
+    case BlendMode::kSrcIn:
+      return Add(Factor::kDestinationAlpha, Factor::kZero);
+    case BlendMode::kDstIn:
+      return Add(Factor::kZero, Factor::kSourceAlpha);
+    case BlendMode::kSrcOut:
+      return Add(Factor::kOneMinusDestinationAlpha, Factor::kZero);
+    case BlendMode::kDstOut:
+      return Add(Factor::kZero, Factor::kOneMinusSourceAlpha);
+    case BlendMode::kSrcATop:
+      return Add(Factor::kDestinationAlpha, Factor::kOneMinusSourceAlpha);
+    case BlendMode::kDstATop:
+      return Add(Factor::kOneMinusDestinationAlpha, Factor::kSourceAlpha);
+    case BlendMode::kXor:
+      return Add(Factor::kOneMinusDestinationAlpha,
+                 Factor::kOneMinusSourceAlpha);
+    case BlendMode::kPlus:
+      return Add(Factor::kOne, Factor::kOne);
+    case BlendMode::kModulate:
+      return Add(Factor::kZero, Factor::kSourceColor);
+    default:
+      VALIDATION_LOG << "Cannot use blend mode " << static_cast<int>(mode)
+                     << " as a pipeline blend.";
+      return Add(Factor::kOne, Factor::kOneMinusSourceAlpha);
+  }
+}
+
 constexpr bool StoreActionNeedsResolveTexture(StoreAction action) {
   switch (action) {
     case StoreAction::kDontCare:

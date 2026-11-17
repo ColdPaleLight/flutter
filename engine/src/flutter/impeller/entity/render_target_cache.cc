@@ -4,6 +4,7 @@
 
 #include "impeller/entity/render_target_cache.h"
 #include "impeller/core/formats.h"
+#include "impeller/renderer/context.h"
 #include "impeller/renderer/render_target.h"
 
 namespace impeller {
@@ -17,6 +18,7 @@ void RenderTargetCache::Start() {
   cache_disabled_count_ = 0;
   for (auto& td : render_target_data_) {
     td.used_this_frame = false;
+    td.secondary_resolve_used_this_frame = false;
   }
 }
 
@@ -25,6 +27,13 @@ void RenderTargetCache::End() {
   std::vector<RenderTargetData> retain;
 
   for (RenderTargetData& td : render_target_data_) {
+    if (td.secondary_resolve_texture && !td.secondary_resolve_used_this_frame) {
+      if (td.secondary_resolve_keep_alive_frame_count > 0) {
+        td.secondary_resolve_keep_alive_frame_count--;
+      } else {
+        td.secondary_resolve_texture.reset();
+      }
+    }
     if (td.used_this_frame) {
       retain.push_back(td);
     } else if (td.keep_alive_frame_count > 0) {
@@ -76,6 +85,8 @@ RenderTarget RenderTargetCache::CreateOffscreen(
       .mip_count = static_cast<size_t>(mip_count),
       .has_msaa = false,
       .has_depth_stencil = stencil_attachment_config.has_value(),
+      .color_format = target_pixel_format.value_or(
+          context.GetCapabilities()->GetDefaultColorFormat()),
   };
 
   if (CacheEnabled()) {
@@ -136,6 +147,8 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
       .mip_count = static_cast<size_t>(mip_count),
       .has_msaa = true,
       .has_depth_stencil = stencil_attachment_config.has_value(),
+      .color_format = target_pixel_format.value_or(
+          context.GetCapabilities()->GetDefaultColorFormat()),
   };
   if (CacheEnabled()) {
     for (RenderTargetData& render_target_data : render_target_data_) {
@@ -171,6 +184,50 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
     });
   }
   return created_target;
+}
+
+static bool HasSameView(const Attachment& a, const Attachment& b) {
+  return a.texture == b.texture && a.mip_level == b.mip_level &&
+         a.slice == b.slice;
+}
+
+template <class T>
+static bool HasSameView(const std::optional<T>& a, const std::optional<T>& b) {
+  return a.has_value() == b.has_value() && (!a || HasSameView(*a, *b));
+}
+
+std::shared_ptr<Texture> RenderTargetCache::CreateSecondaryResolveTexture(
+    const RenderTarget& target) {
+  if (CacheEnabled() && target.GetMaxColorAttachmentBindIndex() == 0) {
+    const auto& color = target.GetColorAttachment(0);
+    for (auto& data : render_target_data_) {
+      if (!data.config.has_msaa || !data.used_this_frame ||
+          data.secondary_resolve_used_this_frame) {
+        continue;
+      }
+      // Vulkan caches the framebuffer on the resolve texture. Reuse the
+      // alternate only with the original target's attachment views.
+      const auto& cached = data.render_target;
+      const auto& cached_color = cached.GetColorAttachment(0);
+      if (!HasSameView(cached_color, color) ||
+          cached_color.resolve_texture != color.resolve_texture ||
+          !HasSameView(cached.GetDepthAttachment(),
+                       target.GetDepthAttachment()) ||
+          !HasSameView(cached.GetStencilAttachment(),
+                       target.GetStencilAttachment())) {
+        continue;
+      }
+      if (!data.secondary_resolve_texture) {
+        data.secondary_resolve_texture =
+            RenderTargetAllocator::CreateSecondaryResolveTexture(target);
+      }
+      data.secondary_resolve_used_this_frame =
+          data.secondary_resolve_texture != nullptr;
+      data.secondary_resolve_keep_alive_frame_count = keep_alive_frame_count_;
+      return data.secondary_resolve_texture;
+    }
+  }
+  return RenderTargetAllocator::CreateSecondaryResolveTexture(target);
 }
 
 size_t RenderTargetCache::CachedTextureCount() const {

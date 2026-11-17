@@ -104,6 +104,30 @@ TEST_P(RenderTargetCacheTest, CachesUsedTexturesAcrossFramesWithKeepAlive) {
   EXPECT_EQ(render_target_cache.CachedTextureCount(), 0u);
 }
 
+TEST_P(RenderTargetCacheTest, ExpiresUnusedSecondaryResolve) {
+  const auto& context = *GetContext();
+  if (!context.GetCapabilities()->SupportsOffscreenMSAA()) {
+    GTEST_SKIP() << "This test needs offscreen MSAA.";
+  }
+  RenderTargetCache cache(context.GetResourceAllocator(),
+                          /*keep_alive_frame_count=*/0);
+  cache.Start();
+  auto target = cache.CreateOffscreenMSAA(context, {100, 100}, 1);
+  ASSERT_TRUE(target.IsValid());
+  std::weak_ptr<Texture> secondary =
+      cache.CreateSecondaryResolveTexture(target);
+  ASSERT_FALSE(secondary.expired());
+  cache.End();
+  ASSERT_FALSE(secondary.expired());
+
+  cache.Start();
+  auto next_target = cache.CreateOffscreenMSAA(context, {100, 100}, 1);
+  ASSERT_EQ(next_target.GetRenderTargetTexture(),
+            target.GetRenderTargetTexture());
+  cache.End();
+  EXPECT_TRUE(secondary.expired());
+}
+
 TEST_P(RenderTargetCacheTest, DoesNotPersistFailedAllocations) {
   ScopedValidationDisable disable;
   auto allocator = std::make_shared<TestAllocator>();

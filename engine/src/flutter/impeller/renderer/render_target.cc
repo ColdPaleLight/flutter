@@ -321,12 +321,20 @@ RenderTargetConfig RenderTarget::ToConfig() const {
       .size = color_attachment.texture->GetSize(),
       .mip_count = color_attachment.texture->GetMipCount(),
       .has_msaa = color_attachment.resolve_texture != nullptr,
-      .has_depth_stencil = depth_.has_value() && stencil_.has_value()};
+      .has_depth_stencil = depth_.has_value() && stencil_.has_value(),
+      .color_format = GetRenderTargetPixelFormat()};
 }
 
 RenderTargetAllocator::RenderTargetAllocator(
     std::shared_ptr<Allocator> allocator)
     : allocator_(std::move(allocator)) {}
+
+std::shared_ptr<Texture> RenderTargetAllocator::CreateSecondaryResolveTexture(
+    const RenderTarget& target) {
+  const auto& resolve = target.GetColorAttachment(0).resolve_texture;
+  FML_DCHECK(resolve);
+  return allocator_->CreateTexture(resolve->GetTextureDescriptor());
+}
 
 void RenderTargetAllocator::Start() {}
 

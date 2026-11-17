@@ -65,6 +65,9 @@ class RenderTargetCache : public RenderTargetAllocator {
       const std::shared_ptr<Texture>& existing_depth_stencil_texture = nullptr,
       std::optional<PixelFormat> target_pixel_format = std::nullopt) override;
 
+  std::shared_ptr<Texture> CreateSecondaryResolveTexture(
+      const RenderTarget& target) override;
+
   // visible for testing.
   size_t CachedTextureCount() const;
 
@@ -74,6 +77,9 @@ class RenderTargetCache : public RenderTargetAllocator {
     uint32_t keep_alive_frame_count;
     RenderTargetConfig config;
     RenderTarget render_target;
+    std::shared_ptr<Texture> secondary_resolve_texture;
+    bool secondary_resolve_used_this_frame = false;
+    uint32_t secondary_resolve_keep_alive_frame_count = 0;
   };
 
   bool CacheEnabled() const;

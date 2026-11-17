@@ -89,6 +89,18 @@ TEST_P(RendererTest, CachesRenderPassAndFramebufferNonMSAA) {
 
   EXPECT_TRUE(render_pass_2->EncodeCommands());
   EXPECT_TRUE(GetContext()->GetCommandQueue()->Submit({buffer_2}).ok());
+
+  const auto cleared = texture_vk.GetCachedFrameData(SampleCount::kCount1);
+  auto color = render_target.GetColorAttachment(0);
+  color.load_action = LoadAction::kLoad;
+  render_target.SetColorAttachment(color, 0);
+  auto buffer_3 = GetContext()->CreateCommandBuffer();
+  auto render_pass_3 = buffer_3->CreateRenderPass(render_target);
+  const auto loaded = texture_vk.GetCachedFrameData(SampleCount::kCount1);
+  EXPECT_EQ(loaded.framebuffer, cleared.framebuffer);
+  EXPECT_NE(loaded.render_pass, cleared.render_pass);
+  EXPECT_TRUE(render_pass_3->EncodeCommands());
+  EXPECT_TRUE(GetContext()->GetCommandQueue()->Submit({buffer_3}).ok());
 }
 
 TEST_P(RendererTest, CachesRenderPassAndFramebufferMixed) {

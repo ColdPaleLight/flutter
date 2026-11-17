@@ -14,10 +14,11 @@ uniform FragInfo {
   float stroke_width;
   float aa_pixels;
   float stroked;
+  float coverage_blend_output;
 }
 frag_info;
 
-out vec4 frag_color;
+#include "coverage_output.glsl"
 
 highp in vec2 v_position;
 
@@ -86,9 +87,6 @@ void main() {
 
   float alpha = 1.0 - smoothstep(-fade_size, fade_size, sdf_distance);
 
-  float finalAlpha = frag_info.color.a * alpha;
-
-  frag_color = vec4(frag_info.color.rgb, finalAlpha);
-
-  frag_color = IPPremultiply(frag_color);
+  WriteCoverageBlendOutput(IPPremultiply(frag_info.color), alpha,
+                           frag_info.coverage_blend_output);
 }

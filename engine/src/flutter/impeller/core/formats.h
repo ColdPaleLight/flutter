@@ -363,7 +363,7 @@ constexpr const char* PixelFormatToString(PixelFormat format) {
   FML_UNREACHABLE();
 }
 
-enum class BlendFactor {
+enum class BlendFactor : uint8_t {
   kZero,
   kOne,
   kSourceColor,
@@ -381,10 +381,42 @@ enum class BlendFactor {
   kOneMinusBlendAlpha,
 };
 
-enum class BlendOperation {
+enum class BlendOperation : uint8_t {
   kAdd,
   kSubtract,
   kReverseSubtract,
+};
+
+struct BlendEquation {
+  BlendFactor source = BlendFactor::kOne;
+  BlendFactor destination = BlendFactor::kZero;
+  BlendOperation operation = BlendOperation::kAdd;
+
+  constexpr uint32_t ToKey() const {
+    static_assert(static_cast<uint32_t>(BlendFactor::kOneMinusBlendAlpha) < 32);
+    static_assert(static_cast<uint32_t>(BlendOperation::kReverseSubtract) < 4);
+    return static_cast<uint32_t>(source) |
+           (static_cast<uint32_t>(destination) << 5) |
+           (static_cast<uint32_t>(operation) << 10);
+  }
+};
+
+// Fixed-function blending state. The default writes the fragment unchanged.
+struct BlendState {
+  bool enabled = false;
+  BlendEquation color;
+  BlendEquation alpha;
+
+  static constexpr BlendState Add(BlendFactor source, BlendFactor destination) {
+    const BlendEquation equation{source, destination, BlendOperation::kAdd};
+    return {.enabled = true, .color = equation, .alpha = equation};
+  }
+
+  // One enabled bit and twelve bits for each equation.
+  constexpr uint32_t ToKey() const {
+    return static_cast<uint32_t>(enabled) | (color.ToKey() << 1) |
+           (alpha.ToKey() << 13);
+  }
 };
 
 enum class LoadAction {

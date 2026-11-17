@@ -82,6 +82,12 @@ class Contents {
   /// render this contents.
   virtual bool IsOpaque(const Matrix& transform) const;
 
+  // Unpremultiplied solid color, including inherited opacity and excluding
+  // fragment coverage. When present, Render can also output a coverage mask.
+  virtual std::optional<Color> GetCoverageBlendColor() const {
+    return std::nullopt;
+  }
+
   struct SnapshotOptions {
     std::optional<Rect> coverage_limit = std::nullopt;
     std::optional<SamplerDescriptor> sampler_descriptor = std::nullopt;
@@ -89,6 +95,7 @@ class Contents {
     int32_t mip_count = 1;
     std::string_view label = "Snapshot";
     int32_t coverage_expansion = 1;
+    bool coverage_only = false;
   };
 
   //----------------------------------------------------------------------------

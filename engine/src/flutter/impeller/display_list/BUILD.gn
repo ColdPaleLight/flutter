@@ -124,6 +124,9 @@ template("display_list_unittests_component") {
       "//flutter/impeller/testing:screenshot",
       "//flutter/txt",
     ]
+    if (impeller_enable_vulkan) {
+      deps += [ "../renderer/backend/vulkan" ]
+    }
     if (defined(invoker.public_configs)) {
       public_configs = invoker.public_configs
     }

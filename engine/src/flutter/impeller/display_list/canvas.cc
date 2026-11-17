@@ -32,6 +32,7 @@
 #include "impeller/entity/contents/color_source_contents.h"
 #include "impeller/entity/contents/complex_rse_contents.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/filters/blend_filter_contents.h"
 #include "impeller/entity/contents/filters/filter_contents.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
 #include "impeller/entity/contents/gradient_generator.h"
@@ -190,7 +191,8 @@ static const constexpr RenderTarget::AttachmentConfig kDefaultStencilConfig =
 static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
     ContentContext& renderer,
     ISize size,
-    const Color& clear_color) {
+    const Color& clear_color,
+    const RenderTarget* match = nullptr) {
   const std::shared_ptr<Context>& context = renderer.GetContext();
 
   /// All of the load/store actions are managed by `InlinePassContext` when
@@ -199,7 +201,10 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
   /// changed for the lifetime of the textures.
 
   RenderTarget target;
-  if (context->GetCapabilities()->SupportsOffscreenMSAA()) {
+  const auto format =
+      match ? std::optional(match->GetRenderTargetPixelFormat()) : std::nullopt;
+  if (context->GetCapabilities()->SupportsOffscreenMSAA() &&
+      (!match || match->GetSampleCount() != SampleCount::kCount1)) {
     target = renderer.GetRenderTargetCache()->CreateOffscreenMSAA(
         /*context=*/*context,
         /*size=*/size,
@@ -212,7 +217,8 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
             .load_action = LoadAction::kDontCare,
             .store_action = StoreAction::kMultisampleResolve,
             .clear_color = clear_color},
-        /*stencil_attachment_config=*/kDefaultStencilConfig);
+        /*stencil_attachment_config=*/kDefaultStencilConfig, nullptr, nullptr,
+        nullptr, format);
   } else {
     target = renderer.GetRenderTargetCache()->CreateOffscreen(
         *context,  // context
@@ -224,9 +230,8 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
             .load_action = LoadAction::kDontCare,
             .store_action = StoreAction::kDontCare,
             .clear_color = clear_color,
-        },                     // color_attachment_config
-        kDefaultStencilConfig  //
-    );
+        },  // color_attachment_config
+        kDefaultStencilConfig, nullptr, nullptr, format);
   }
 
   return std::make_unique<EntityPassTarget>(
@@ -484,11 +489,13 @@ Canvas::Canvas(ContentContext& renderer,
                const RenderTarget& render_target,
                bool is_onscreen,
                bool requires_readback,
-               IRect32 cull_rect)
+               IRect32 cull_rect,
+               bool requires_coverage_readback)
     : renderer_(renderer),
       render_target_(render_target),
       is_onscreen_(is_onscreen),
-      requires_readback_(requires_readback),
+      requires_readback_(requires_readback || requires_coverage_readback),
+      requires_coverage_readback_(requires_coverage_readback),
       clip_coverage_stack_(EntityPassClipStack(
           Rect::MakeSize(render_target.GetRenderTargetSize()))) {
   Initialize(Rect::MakeLTRB(cull_rect.GetLeft(), cull_rect.GetTop(),
@@ -691,8 +698,9 @@ bool Canvas::AttemptColorFilterOptimization(
 bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
                                           Scalar radius,
                                           const Paint& paint) {
-  if (paint.HasColorFilter() || paint.image_filter || paint.invert_colors ||
-      paint.color_source || paint.mask_blur_descriptor.has_value()) {
+  const bool coverage_blend = paint.UsesCoverageBlend();
+  if (!coverage_blend && (paint.HasColorFilter() || paint.image_filter ||
+                          paint.color_source || paint.mask_blur_descriptor)) {
     return false;
   }
 
@@ -709,8 +717,9 @@ bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
   }
   geom->SetAntialiasPadding(kAntialiasPadding);
 
-  auto contents =
-      CircleContents::Make(std::move(geom), paint.color, is_stroked);
+  const Color color =
+      coverage_blend ? paint.FilterColor(paint.color) : paint.color;
+  auto contents = CircleContents::Make(std::move(geom), color, is_stroked);
   entity.SetContents(std::move(contents));
   AddRenderEntityToCurrentPass(entity);
 
@@ -1114,13 +1123,17 @@ void Canvas::DrawRect(const Rect& rect, const Paint& paint) {
   }
 }
 
-void Canvas::DrawOval(const Rect& rect, const Paint& paint) {
+bool Canvas::CanDrawOvalAsCircle(const Rect& rect, const Paint& paint) {
   // TODO(jonahwilliams): This additional condition avoids an assert in the
   // stroke circle geometry generator. I need to verify the condition that this
   // assert prevents.
-  if (rect.IsSquare() && (paint.style == Paint::Style::kFill ||
-                          (paint.style == Paint::Style::kStroke &&
-                           paint.stroke.width < rect.GetWidth()))) {
+  return rect.IsSquare() && (paint.style == Paint::Style::kFill ||
+                             (paint.style == Paint::Style::kStroke &&
+                              paint.stroke.width < rect.GetWidth()));
+}
+
+void Canvas::DrawOval(const Rect& rect, const Paint& paint) {
+  if (CanDrawOvalAsCircle(rect, paint)) {
     // Circles have slightly less overhead and can do stroking
     DrawCircle(rect.GetCenter(), rect.GetWidth() * 0.5f, paint);
     return;
@@ -1749,10 +1762,11 @@ void Canvas::SetupRenderPass() {
   // a second save layer with the same dimensions as the onscreen. When
   // rendering is completed, we must blit this saveLayer to the onscreen.
   if (requires_readback_) {
-    auto entity_pass_target =
-        CreateRenderTarget(renderer_,                  //
-                           color0.texture->GetSize(),  //
-                           /*clear_color=*/Color::BlackTransparent());
+    auto entity_pass_target = CreateRenderTarget(
+        renderer_,                  //
+        color0.texture->GetSize(),  //
+        /*clear_color=*/Color::BlackTransparent(),
+        requires_coverage_readback_ ? &render_target_ : nullptr);
     render_passes_.push_back(
         LazyRenderingConfig(renderer_, std::move(entity_pass_target)));
   } else {
@@ -1943,7 +1957,8 @@ void Canvas::SaveLayer(const Paint& paint,
       // 3. The current render pass is for the onscreen pass.
       const bool should_use_onscreen =
           renderer_.GetDeviceCapabilities().SupportsFramebufferFetch() &&
-          backdrop_count_ == 0 && render_passes_.size() == 1u;
+          !requires_coverage_readback_ && backdrop_count_ == 0 &&
+          render_passes_.size() == 1u;
       input_texture = FlipBackdrop(
           GetGlobalPassPosition(),                                //
           /*should_remove_texture=*/will_cache_backdrop_texture,  //
@@ -2269,8 +2284,12 @@ void Canvas::DrawTextFrame(const std::shared_ptr<TextFrame>& text_frame,
   text_contents->SetPosition(position);
   text_contents->SetScreenTransform(GetCurrentTransform());
   text_contents->SetForceTextColor(paint.mask_blur_descriptor.has_value());
-  text_contents->SetColor(paint.color);
-  text_contents->SetTextProperties(paint.color, paint.GetStroke());
+  const bool coverage_blend =
+      paint.UsesCoverageBlend() && !text_frame->HasColor();
+  const Color ink =
+      coverage_blend ? paint.FilterColor(paint.color) : paint.color;
+  text_contents->SetColor(ink);
+  text_contents->SetTextProperties(ink, paint.GetStroke());
 
   entity.SetTransform(GetCurrentTransform().Translate(position));
 
@@ -2279,7 +2298,12 @@ void Canvas::DrawTextFrame(const std::shared_ptr<TextFrame>& text_frame,
     return;
   }
 
-  entity.SetContents(paint.WithFilters(renderer_, std::move(text_contents)));
+  if (coverage_blend) {
+    text_contents->SetUsesGlyphCoverageForBlend();
+    entity.SetContents(std::move(text_contents));
+  } else {
+    entity.SetContents(paint.WithFilters(renderer_, std::move(text_contents)));
+  }
   AddRenderEntityToCurrentPass(entity, false);
 }
 
@@ -2433,7 +2457,11 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
       Matrix::MakeTranslation(Vector3(-GetGlobalPassPosition())) *
       entity.GetTransform());
   entity.SetInheritedOpacity(transform_stack_.back().distributed_opacity);
-  if (entity.GetBlendMode() == BlendMode::kSrcOver &&
+  const auto coverage_color =
+      SupportsCoverageBlend(entity.GetBlendMode())
+          ? entity.GetContents()->GetCoverageBlendColor()
+          : std::nullopt;
+  if (!coverage_color && entity.GetBlendMode() == BlendMode::kSrcOver &&
       entity.GetContents()->IsOpaque(entity.GetTransform())) {
     entity.SetBlendMode(BlendMode::kSrc);
   }
@@ -2470,6 +2498,25 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
   FML_DCHECK(current_depth_ <= transform_stack_.back().clip_depth)
       << current_depth_ << " <=? " << transform_stack_.back().clip_depth;
   entity.SetClipDepth(current_depth_);
+
+  if (coverage_color) {
+    const auto& device = renderer_.GetDeviceCapabilities();
+    const auto& target =
+        render_passes_.back().GetEntityPassTarget()->GetRenderTarget();
+    auto plan = ResolveCoverageBlendPlan(
+        entity.GetBlendMode(), coverage_color->alpha,
+        CanFetchCoverageBlendDestination(device, target));
+    if (plan) {
+      if (const auto* blend = std::get_if<ProgrammableCoverageBlend>(&*plan)) {
+        if (!RenderCoverageBlend(entity, *coverage_color, *blend)) {
+          VALIDATION_LOG << "Failed to composite with coverage.";
+          coverage_blend_failed_ = true;
+        }
+        return;
+      }
+      entity.SetCoverageBlend(std::get<FixedFunctionCoverageBlend>(*plan));
+    }
+  }
 
   if (entity.GetBlendMode() > Entity::kLastPipelineBlendMode) {
     if (renderer_.GetDeviceCapabilities().SupportsFramebufferFetch()) {
@@ -2522,6 +2569,59 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
   entity.Render(renderer_, *result);
 }
 
+bool Canvas::RenderCoverageBlend(const Entity& entity,
+                                 Color source_color,
+                                 const ProgrammableCoverageBlend& blend) {
+  auto* context = render_passes_.back().GetInlinePassContext();
+  const auto& target = context->GetPassTarget().GetRenderTarget();
+  const auto clip = clip_coverage_stack_.CurrentClipCoverage();
+  const auto coverage_limit =
+      clip ? clip->Shift(-GetGlobalPassPosition())
+                 .Intersection(Rect::MakeSize(target.GetRenderTargetSize()))
+           : std::nullopt;
+  const auto bounds = entity.GetCoverage();
+  if (!coverage_limit || !bounds ||
+      !bounds->Expand(1).IntersectsWithRect(*coverage_limit)) {
+    return true;
+  }
+  const auto mask = entity.GetContents()->RenderToSnapshot(
+      renderer_, entity,
+      {.coverage_limit = coverage_limit,
+       .sampler_descriptor = SamplerDescriptor{},
+       .msaa_enabled = false,
+       .label = "Coverage mask",
+       .coverage_only = true});
+  if (!mask) {
+    return false;
+  }
+  if (blend.destination_read ==
+      ProgrammableCoverageBlend::DestinationRead::kFramebufferFetch) {
+    const auto& pass = context->GetRenderPass();
+    return pass &&
+           FramebufferBlendContents::RenderCoverageBlend(
+               renderer_, entity, *pass, *mask, source_color, blend.program);
+  }
+  if (!requires_readback_ && render_passes_.size() == 1u &&
+      NeedsCoverageReadbackTarget(renderer_.GetDeviceCapabilities(), target,
+                                  is_onscreen_)) {
+    return false;
+  }
+  auto backdrop = FlipBackdrop(GetGlobalPassPosition(), false, false,
+                               /*post_depth_increment=*/true);
+  if (!backdrop) {
+    return false;
+  }
+  const auto& pass =
+      render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  if (!pass) {
+    return false;
+  }
+  SetClipScissor(clip, *pass, GetGlobalPassPosition());
+  return BlendFilterContents::RenderCoverageBlend(renderer_, entity, *pass,
+                                                  *mask, std::move(backdrop),
+                                                  source_color, blend.program);
+}
+
 RenderPass& Canvas::GetCurrentRenderPass() const {
   return *render_passes_.back().GetInlinePassContext()->GetRenderPass();
 }
@@ -2551,8 +2651,8 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
   // In cases where there are no contents, we
   // could instead check the clear color and initialize a 1x2 CPU texture
   // instead of ending the pass.
-  rendering_config.GetInlinePassContext()->GetRenderPass();
-  if (!rendering_config.GetInlinePassContext()->EndPass()) {
+  auto* pass_context = rendering_config.GetInlinePassContext();
+  if (!pass_context->GetRenderPass() || !pass_context->EndPass()) {
     VALIDATION_LOG
         << "Failed to end the current render pass in order to read from "
            "the backdrop texture and apply an advanced blend or backdrop "
@@ -2564,8 +2664,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
     return nullptr;
   }
 
-  const std::shared_ptr<Texture>& input_texture =
-      rendering_config.GetInlinePassContext()->GetTexture();
+  const auto input_texture = pass_context->GetTexture();
 
   if (!input_texture) {
     VALIDATION_LOG << "Failed to fetch the color texture in order to "
@@ -2602,8 +2701,12 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
       render_passes_.back().GetEntityPassTarget()->RemoveSecondary();
     }
   }
-  RenderPass& current_render_pass =
-      *render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  const auto& pass =
+      render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  if (!pass) {
+    return nullptr;
+  }
+  RenderPass& current_render_pass = *pass;
 
   // If the current pass already contains the backdrop, which only happens when
   // MSAA is not available, the eager restore below is unnecessary and would
@@ -2672,6 +2775,9 @@ bool Canvas::SupportsBlitToOnscreen() const {
 
 bool Canvas::BlitToOnscreen(bool is_onscreen) {
   auto command_buffer = renderer_.GetContext()->CreateCommandBuffer();
+  if (!command_buffer) {
+    return false;
+  }
   command_buffer->SetLabel("EntityPass Root Command Buffer");
   auto offscreen_target = render_passes_.back()
                               .GetInlinePassContext()
@@ -2679,14 +2785,31 @@ bool Canvas::BlitToOnscreen(bool is_onscreen) {
                               .GetRenderTarget();
   if (SupportsBlitToOnscreen()) {
     auto blit_pass = command_buffer->CreateBlitPass();
-    blit_pass->AddCopy(offscreen_target.GetRenderTargetTexture(),
-                       render_target_.GetRenderTargetTexture());
-    if (!blit_pass->EncodeCommands()) {
+    if (!blit_pass ||
+        !blit_pass->AddCopy(offscreen_target.GetRenderTargetTexture(),
+                            render_target_.GetRenderTargetTexture()) ||
+        !blit_pass->EncodeCommands()) {
       VALIDATION_LOG << "Failed to encode root pass blit command.";
       return false;
     }
   } else {
-    auto render_pass = command_buffer->CreateRenderPass(render_target_);
+    // The full-target draw still depth tests. Initialize the attachments in
+    // this pass, which does not go through InlinePassContext.
+    auto target = render_target_;
+    if (auto depth = target.GetDepthAttachment()) {
+      depth->load_action = LoadAction::kClear;
+      depth->clear_depth = 0.0f;
+      target.SetDepthAttachment(depth);
+    }
+    if (auto stencil = target.GetStencilAttachment()) {
+      stencil->load_action = LoadAction::kClear;
+      stencil->clear_stencil = 0u;
+      target.SetStencilAttachment(stencil);
+    }
+    auto render_pass = command_buffer->CreateRenderPass(target);
+    if (!render_pass) {
+      return false;
+    }
     render_pass->SetLabel("EntityPass Root Render Pass");
 
     {
@@ -2738,32 +2861,37 @@ bool Canvas::EnsureFinalMipmapGeneration() const {
   return renderer_.GetContext()->EnqueueCommandBuffer(std::move(cmd_buffer));
 }
 
-void Canvas::EndReplay() {
+bool Canvas::EndReplay() {
   FML_DCHECK(render_passes_.size() == 1u);
-  render_passes_.back().GetInlinePassContext()->GetRenderPass();
-  render_passes_.back().GetInlinePassContext()->EndPass(
-      /*is_onscreen=*/!requires_readback_ && is_onscreen_);
+  auto* pass_context = render_passes_.back().GetInlinePassContext();
+  bool success = pass_context->GetRenderPass() &&
+                 pass_context->EndPass(
+                     /*is_onscreen=*/!requires_readback_ && is_onscreen_) &&
+                 !coverage_blend_failed_;
   backdrop_data_.clear();
 
   // If requires_readback_ was true, then we rendered to an offscreen texture
   // instead of to the onscreen provided in the render target. Now we need to
   // draw or blit the offscreen back to the onscreen.
-  if (requires_readback_) {
-    BlitToOnscreen(/*is_onscreen_=*/is_onscreen_);
+  if (success && requires_readback_) {
+    success = BlitToOnscreen(is_onscreen_);
   }
-  if (!EnsureFinalMipmapGeneration()) {
+  if (success && !EnsureFinalMipmapGeneration()) {
     VALIDATION_LOG << "Failed to generate onscreen mipmaps.";
+    success = false;
   }
   if (!renderer_.GetContext()->FlushCommandBuffers()) {
-    // Not much we can do.
     VALIDATION_LOG << "Failed to submit command buffers";
+    success = false;
   }
   render_passes_.clear();
   renderer_.GetRenderTargetCache()->End();
   clip_geometry_.clear();
 
+  coverage_blend_failed_ = false;
   Reset();
   Initialize(initial_cull_rect_);
+  return success;
 }
 
 bool Canvas::IsCompatibleWithSDFRendering(const Paint& paint,

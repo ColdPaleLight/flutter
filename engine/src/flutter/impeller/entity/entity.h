@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "impeller/entity/contents/contents.h"
+#include "impeller/entity/contents/coverage_blend.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/matrix.h"
 #include "impeller/geometry/rect.h"
@@ -159,6 +160,19 @@ class Entity {
 
   BlendMode GetBlendMode() const;
 
+  void SetCoverageBlend(FixedFunctionCoverageBlend blend) {
+    coverage_blend_ = blend;
+  }
+
+  const std::optional<FixedFunctionCoverageBlend>& GetCoverageBlend() const {
+    return coverage_blend_;
+  }
+
+  CoverageBlendOutput GetCoverageBlendOutput() const {
+    return coverage_blend_ ? coverage_blend_->output
+                           : CoverageBlendOutput::kSourceTimesCoverage;
+  }
+
   bool Render(const ContentContext& renderer, RenderPass& parent_pass) const;
 
   static bool IsBlendModeDestructive(BlendMode blend_mode);
@@ -183,6 +197,7 @@ class Entity {
   Matrix transform_;
   std::shared_ptr<Contents> contents_;
   BlendMode blend_mode_ = BlendMode::kSrcOver;
+  std::optional<FixedFunctionCoverageBlend> coverage_blend_;
   uint32_t clip_depth_ = 1u;
 };
 

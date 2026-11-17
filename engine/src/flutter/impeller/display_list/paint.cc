@@ -340,15 +340,8 @@ std::shared_ptr<Contents> Paint::WithColorFilter(
   // Attempt to apply the color filter on the CPU first.
   // Note: This is not just an optimization; some color sources rely on
   //       CPU-applied color filters to behave properly.
-  if (input->ApplyColorFilter([&](Color color) -> Color {
-        if (color_filter) {
-          color = GetCPUColorFilterProc(color_filter)(color);
-        }
-        if (invert_colors) {
-          color = color.ApplyColorMatrix(kColorInversion);
-        }
-        return color;
-      })) {
+  if (input->ApplyColorFilter(
+          [&](Color color) { return FilterColor(color); })) {
     return input;
   }
 
@@ -460,6 +453,18 @@ std::shared_ptr<FilterContents> Paint::MaskBlurDescriptor::CreateMaskBlur(
   return FilterContents::MakeGaussianBlur(
       input, Sigma(blur_sigma.x), Sigma(blur_sigma.y), Entity::TileMode::kDecal,
       /*bounds=*/std::nullopt, style);
+}
+
+bool Paint::UsesCoverageBlend() const {
+  return SupportsCoverageBlend(blend_mode) && !color_source && !image_filter &&
+         !mask_blur_descriptor;
+}
+
+Color Paint::FilterColor(Color source) const {
+  if (color_filter) {
+    source = GetCPUColorFilterProc(color_filter)(source);
+  }
+  return invert_colors ? source.ApplyColorMatrix(kColorInversion) : source;
 }
 
 bool Paint::HasColorFilter() const {

@@ -58,6 +58,13 @@ class TextContents final : public Contents {
   std::optional<Rect> GetCoverage(const Entity& entity) const override;
 
   // |Contents|
+  std::optional<Color> GetCoverageBlendColor() const override {
+    return uses_glyph_coverage_for_blend_ ? std::optional(GetColor())
+                                          : std::nullopt;
+  }
+
+  void SetUsesGlyphCoverageForBlend() { uses_glyph_coverage_for_blend_ = true; }
+
   bool Render(const ContentContext& renderer,
               const Entity& entity,
               RenderPass& pass) const override;
@@ -104,6 +111,7 @@ class TextContents final : public Contents {
   Point position_;
   Matrix screen_transform_;
   bool force_text_color_ = false;
+  bool uses_glyph_coverage_for_blend_ = false;
   Color color_;
   GlyphProperties properties_;
 

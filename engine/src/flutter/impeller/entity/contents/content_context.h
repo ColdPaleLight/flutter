@@ -28,6 +28,9 @@
 #include "third_party/abseil-cpp/absl/status/statusor.h"
 
 namespace impeller {
+
+enum class CoverageBlendProgram : uint8_t;
+
 /// Pipeline state configuration.
 ///
 /// Each unique combination of these options requires a different pipeline state
@@ -84,27 +87,28 @@ struct ContentContextOptions {
   bool has_depth_stencil_attachments = true;
   bool depth_write_enabled = false;
   bool is_for_rrect_blur_clear = false;
+  // When present, use these equations for the color attachment.
+  std::optional<BlendState> blend_state;
 
   constexpr uint64_t ToKey() const {
-    static_assert(sizeof(sample_count) == 1);
     static_assert(sizeof(blend_mode) == 1);
-    static_assert(sizeof(sample_count) == 1);
     static_assert(sizeof(depth_compare) == 1);
     static_assert(sizeof(stencil_mode) == 1);
     static_assert(sizeof(primitive_type) == 1);
     static_assert(sizeof(color_attachment_pixel_format) == 1);
+    static_assert(static_cast<uint8_t>(SampleCount::kCount4) < (1u << 3));
 
-    return (is_for_rrect_blur_clear ? 1llu : 0llu) << 0 |
-           (0) << 1 |  // // Unused, previously wireframe.
+    const uint64_t blend_key =
+        blend_state ? blend_state->ToKey() : static_cast<uint64_t>(blend_mode);
+    return (!blend_state && is_for_rrect_blur_clear ? 1llu : 0llu) << 0 |
+           (blend_state ? 1llu : 0llu) << 1 |
            (has_depth_stencil_attachments ? 1llu : 0llu) << 2 |
            (depth_write_enabled ? 1llu : 0llu) << 3 |
-           // enums
-           static_cast<uint64_t>(color_attachment_pixel_format) << 8 |
-           static_cast<uint64_t>(primitive_type) << 16 |
-           static_cast<uint64_t>(stencil_mode) << 24 |
-           static_cast<uint64_t>(depth_compare) << 32 |
-           static_cast<uint64_t>(blend_mode) << 40 |
-           static_cast<uint64_t>(sample_count) << 48;
+           static_cast<uint64_t>(color_attachment_pixel_format) << 4 |
+           static_cast<uint64_t>(primitive_type) << 12 |
+           static_cast<uint64_t>(stencil_mode) << 20 |
+           static_cast<uint64_t>(depth_compare) << 28 |
+           static_cast<uint64_t>(sample_count) << 36 | (blend_key << 39);
   }
 
   void ApplyToPipelineDescriptor(PipelineDescriptor& desc) const;
@@ -169,6 +173,8 @@ class ContentContext {
   PipelineRef GetBlendSaturationPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendSoftLightPipeline(ContentContextOptions opts) const;
+  PipelineRef GetOffscreenCoverageBlendPipeline(CoverageBlendProgram program,
+                                                ContentContextOptions opts) const;
   PipelineRef GetCirclePipeline(ContentContextOptions opts) const;
   PipelineRef GetClipPipeline(ContentContextOptions opts) const;
   PipelineRef GetColorMatrixColorFilterPipeline(ContentContextOptions opts) const;
@@ -193,6 +199,9 @@ class ContentContext {
   PipelineRef GetFramebufferBlendMultiplyPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendOverlayPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendSaturationPipeline(ContentContextOptions opts) const;
+  PipelineRef GetFramebufferCoverageBlendPipeline(CoverageBlendProgram program,
+                                                  ContentContextOptions opts) const;
+
   PipelineRef GetFramebufferBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendSoftLightPipeline(ContentContextOptions opts) const;
   PipelineRef GetGaussianBlurPipeline(ContentContextOptions opts) const;
@@ -249,7 +258,8 @@ class ContentContext {
       const SubpassCallback& subpass_callback,
       bool msaa_enabled = true,
       bool depth_stencil_enabled = false,
-      int32_t mip_count = 1) const;
+      int32_t mip_count = 1,
+      std::optional<PixelFormat> color_format = std::nullopt) const;
 
   /// Makes a subpass that will render to `subpass_target`.
   absl::StatusOr<RenderTarget> MakeSubpass(

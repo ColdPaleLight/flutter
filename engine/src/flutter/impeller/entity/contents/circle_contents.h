@@ -17,6 +17,10 @@ class CircleContents : public ColorSourceContents {
   static std::unique_ptr<CircleContents>
   Make(std::unique_ptr<CircleGeometry> geometry, Color color, bool stroked);
 
+  std::optional<Color> GetCoverageBlendColor() const override {
+    return color_.WithAlpha(color_.alpha * GetOpacityFactor());
+  }
+
   bool Render(const ContentContext& renderer,
               const Entity& entity,
               RenderPass& pass) const override;

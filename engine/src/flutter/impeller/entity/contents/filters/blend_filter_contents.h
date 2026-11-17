@@ -93,6 +93,15 @@ class BlendFilterContents : public ColorFilterContents {
   ///         been blended.
   void SetForegroundColor(std::optional<Color> color);
 
+  // The second input is a pixel-aligned coverage mask for the foreground color.
+  static bool RenderCoverageBlend(const ContentContext& renderer,
+                                  const Entity& entity,
+                                  RenderPass& pass,
+                                  const Snapshot& mask,
+                                  std::shared_ptr<Texture> backdrop,
+                                  Color source_color,
+                                  CoverageBlendProgram program);
+
  private:
   // |FilterContents|
   std::optional<Entity> RenderFilter(

@@ -113,6 +113,9 @@ impeller_shaders("framebuffer_blend_entity_shaders") {
     "shaders/blending/framebuffer_blend.vert",
     "shaders/blending/framebuffer_blend.frag",
   ]
+  if (impeller_enable_vulkan) {
+    shaders += [ "shaders/blending/framebuffer_blend_single_sample.frag" ]
+  }
 }
 
 impeller_component("entity") {
@@ -135,6 +138,8 @@ impeller_component("entity") {
     "contents/content_context.h",
     "contents/contents.cc",
     "contents/contents.h",
+    "contents/coverage_blend.cc",
+    "contents/coverage_blend.h",
     "contents/filters/blend_filter_contents.cc",
     "contents/filters/blend_filter_contents.h",
     "contents/filters/color_filter_contents.cc",

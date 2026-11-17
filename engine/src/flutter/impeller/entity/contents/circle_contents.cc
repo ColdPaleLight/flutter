@@ -50,6 +50,8 @@ bool CircleContents::Render(const ContentContext& renderer,
   frag_info.stroke_width = geometry_->GetStrokeWidth();
   frag_info.aa_pixels = aa_padding_;
   frag_info.stroked = stroked_ ? 1.0f : 0.0f;
+  frag_info.coverage_blend_output =
+      static_cast<Scalar>(entity.GetCoverageBlendOutput());
 
   PipelineBuilderCallback pipeline_callback =
       [&renderer](ContentContextOptions options) {

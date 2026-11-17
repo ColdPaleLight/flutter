@@ -9,6 +9,56 @@
 
 namespace impeller {
 
+namespace {
+
+ContentContextOptions GetFramebufferBlendOptions(const RenderPass& pass) {
+  auto options = OptionsFromPass(pass);
+  options.primitive_type = PrimitiveType::kTriangleStrip;
+  return options;
+}
+
+PipelineRef GetAdvancedBlendPipeline(const ContentContext& renderer,
+                                     ContentContextOptions options,
+                                     BlendMode mode) {
+  options.blend_mode = BlendMode::kSrc;
+  switch (mode) {
+    case BlendMode::kScreen:
+      return renderer.GetFramebufferBlendScreenPipeline(options);
+    case BlendMode::kOverlay:
+      return renderer.GetFramebufferBlendOverlayPipeline(options);
+    case BlendMode::kDarken:
+      return renderer.GetFramebufferBlendDarkenPipeline(options);
+    case BlendMode::kLighten:
+      return renderer.GetFramebufferBlendLightenPipeline(options);
+    case BlendMode::kColorDodge:
+      return renderer.GetFramebufferBlendColorDodgePipeline(options);
+    case BlendMode::kColorBurn:
+      return renderer.GetFramebufferBlendColorBurnPipeline(options);
+    case BlendMode::kHardLight:
+      return renderer.GetFramebufferBlendHardLightPipeline(options);
+    case BlendMode::kSoftLight:
+      return renderer.GetFramebufferBlendSoftLightPipeline(options);
+    case BlendMode::kDifference:
+      return renderer.GetFramebufferBlendDifferencePipeline(options);
+    case BlendMode::kExclusion:
+      return renderer.GetFramebufferBlendExclusionPipeline(options);
+    case BlendMode::kMultiply:
+      return renderer.GetFramebufferBlendMultiplyPipeline(options);
+    case BlendMode::kHue:
+      return renderer.GetFramebufferBlendHuePipeline(options);
+    case BlendMode::kSaturation:
+      return renderer.GetFramebufferBlendSaturationPipeline(options);
+    case BlendMode::kColor:
+      return renderer.GetFramebufferBlendColorPipeline(options);
+    case BlendMode::kLuminosity:
+      return renderer.GetFramebufferBlendLuminosityPipeline(options);
+    default:
+      return {};
+  }
+}
+
+}  // namespace
+
 FramebufferBlendContents::FramebufferBlendContents() = default;
 
 FramebufferBlendContents::~FramebufferBlendContents() = default;
@@ -39,11 +89,6 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
     return false;
   }
 
-  using VS = FramebufferBlendScreenPipeline::VertexShader;
-  using FS = FramebufferBlendScreenPipeline::FragmentShader;
-
-  auto& data_host_buffer = renderer.GetTransientsDataBuffer();
-
   auto src_snapshot = child_contents_->RenderToSnapshot(
       renderer, entity,
       {.coverage_limit = Rect::MakeSize(pass.GetRenderTargetSize()),
@@ -56,7 +101,40 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
     return true;
   }
 
-  auto size = src_snapshot->texture->GetSize();
+  auto pipeline = GetAdvancedBlendPipeline(
+      renderer, GetFramebufferBlendOptions(pass), blend_mode_);
+  return RenderSnapshot(renderer, entity, pass, *src_snapshot, pipeline,
+                        std::nullopt);
+}
+
+bool FramebufferBlendContents::RenderCoverageBlend(
+    const ContentContext& renderer,
+    const Entity& entity,
+    RenderPass& pass,
+    const Snapshot& mask,
+    Color source_color,
+    CoverageBlendProgram program) {
+  auto options = GetFramebufferBlendOptions(pass);
+  options.blend_mode = entity.GetBlendMode();
+  auto pipeline =
+      renderer.GetFramebufferCoverageBlendPipeline(program, options);
+  return RenderSnapshot(renderer, entity, pass, mask, pipeline, source_color);
+}
+
+bool FramebufferBlendContents::RenderSnapshot(
+    const ContentContext& renderer,
+    const Entity& entity,
+    RenderPass& pass,
+    const Snapshot& src_snapshot,
+    PipelineRef pipeline,
+    std::optional<Color> coverage_source_color) {
+  if (!pipeline) {
+    return false;
+  }
+  using VS = FramebufferBlendPipelineHandle::VertexShader;
+  using FS = FramebufferBlendPipelineHandle::FragmentShader;
+  auto& data_host_buffer = renderer.GetTransientsDataBuffer();
+  auto size = src_snapshot.texture->GetSize();
 
   std::array<VS::PerVertexData, 4> vertices = {
       VS::PerVertexData{Point(0, 0), Point(0, 0)},
@@ -65,68 +143,16 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
       VS::PerVertexData{Point(size.width, size.height), Point(1, 1)},
   };
 
-  auto options = OptionsFromPass(pass);
-  options.blend_mode = BlendMode::kSrc;
-  options.primitive_type = PrimitiveType::kTriangleStrip;
-
   pass.SetCommandLabel("Framebuffer Advanced Blend Filter");
   pass.SetVertexBuffer(
       CreateVertexBuffer(vertices, renderer.GetTransientsDataBuffer()));
 
-  switch (blend_mode_) {
-    case BlendMode::kScreen:
-      pass.SetPipeline(renderer.GetFramebufferBlendScreenPipeline(options));
-      break;
-    case BlendMode::kOverlay:
-      pass.SetPipeline(renderer.GetFramebufferBlendOverlayPipeline(options));
-      break;
-    case BlendMode::kDarken:
-      pass.SetPipeline(renderer.GetFramebufferBlendDarkenPipeline(options));
-      break;
-    case BlendMode::kLighten:
-      pass.SetPipeline(renderer.GetFramebufferBlendLightenPipeline(options));
-      break;
-    case BlendMode::kColorDodge:
-      pass.SetPipeline(renderer.GetFramebufferBlendColorDodgePipeline(options));
-      break;
-    case BlendMode::kColorBurn:
-      pass.SetPipeline(renderer.GetFramebufferBlendColorBurnPipeline(options));
-      break;
-    case BlendMode::kHardLight:
-      pass.SetPipeline(renderer.GetFramebufferBlendHardLightPipeline(options));
-      break;
-    case BlendMode::kSoftLight:
-      pass.SetPipeline(renderer.GetFramebufferBlendSoftLightPipeline(options));
-      break;
-    case BlendMode::kDifference:
-      pass.SetPipeline(renderer.GetFramebufferBlendDifferencePipeline(options));
-      break;
-    case BlendMode::kExclusion:
-      pass.SetPipeline(renderer.GetFramebufferBlendExclusionPipeline(options));
-      break;
-    case BlendMode::kMultiply:
-      pass.SetPipeline(renderer.GetFramebufferBlendMultiplyPipeline(options));
-      break;
-    case BlendMode::kHue:
-      pass.SetPipeline(renderer.GetFramebufferBlendHuePipeline(options));
-      break;
-    case BlendMode::kSaturation:
-      pass.SetPipeline(renderer.GetFramebufferBlendSaturationPipeline(options));
-      break;
-    case BlendMode::kColor:
-      pass.SetPipeline(renderer.GetFramebufferBlendColorPipeline(options));
-      break;
-    case BlendMode::kLuminosity:
-      pass.SetPipeline(renderer.GetFramebufferBlendLuminosityPipeline(options));
-      break;
-    default:
-      return false;
-  }
+  pass.SetPipeline(pipeline);
 
   VS::FrameInfo frame_info;
   FS::FragInfo frag_info{};
 
-  auto src_sampler_descriptor = src_snapshot->sampler_descriptor;
+  auto src_sampler_descriptor = src_snapshot.sampler_descriptor;
   if (renderer.GetDeviceCapabilities().SupportsDecalSamplerAddressMode()) {
     src_sampler_descriptor.width_address_mode = SamplerAddressMode::kDecal;
     src_sampler_descriptor.height_address_mode = SamplerAddressMode::kDecal;
@@ -134,14 +160,18 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
   raw_ptr<const Sampler> src_sampler =
       renderer.GetContext()->GetSamplerLibrary()->GetSampler(
           src_sampler_descriptor);
-  FS::BindTextureSamplerSrc(pass, src_snapshot->texture, src_sampler);
+  FS::BindTextureSamplerSrc(pass, src_snapshot.texture, src_sampler);
 
   frame_info.mvp = Entity::GetShaderTransform(entity.GetShaderClipDepth(), pass,
-                                              src_snapshot->transform);
+                                              src_snapshot.transform);
   VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
-  frag_info.src_input_alpha = src_snapshot->opacity;
+  frag_info.src_input_alpha = src_snapshot.opacity;
   frag_info.dst_input_alpha = 1.0;
+  if (coverage_source_color) {
+    frag_info.coverage_source_color =
+        ToVector(coverage_source_color->Premultiply());
+  }
   FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
 
   return pass.Draw().ok();

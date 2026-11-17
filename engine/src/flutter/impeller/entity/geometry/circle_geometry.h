@@ -49,6 +49,8 @@ class CircleGeometry final : public Geometry {
   Scalar GetAntialiasPadding() const;
 
  private:
+  Scalar GetRadiusPadding(const Matrix& transform) const;
+
   Point center_;
   Scalar radius_;
   Scalar stroke_width_;

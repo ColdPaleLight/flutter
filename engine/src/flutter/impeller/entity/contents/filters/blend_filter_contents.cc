@@ -94,7 +94,7 @@ BlendFilterContents::~BlendFilterContents() = default;
 using PipelineProc =
     PipelineRef (ContentContext::*)(ContentContextOptions) const;
 
-template <typename TPipeline>
+template <typename TPipeline, typename GetPipelineProc>
 static std::optional<Entity> AdvancedBlend(
     const FilterInput::Vector& inputs,
     const ContentContext& renderer,
@@ -103,8 +103,10 @@ static std::optional<Entity> AdvancedBlend(
     BlendMode blend_mode,
     std::optional<Color> foreground_color,
     ColorFilterContents::AbsorbOpacity absorb_opacity,
-    PipelineProc pipeline_proc,
-    std::optional<Scalar> alpha) {
+    GetPipelineProc pipeline_proc,
+    std::optional<Scalar> alpha,
+    const Snapshot* coverage_mask = nullptr,
+    std::optional<PixelFormat> target_format = std::nullopt) {
   using VS = typename TPipeline::VertexShader;
   using FS = typename TPipeline::FragmentShader;
 
@@ -166,9 +168,10 @@ static std::optional<Entity> AdvancedBlend(
 
   std::optional<Snapshot> src_snapshot;
   std::array<Point, 4> src_uvs;
-  if (!foreground_color.has_value()) {
-    src_snapshot =
-        inputs[1]->GetSnapshot("AdvancedBlend(Src)", renderer, entity);
+  if (coverage_mask || !foreground_color.has_value()) {
+    src_snapshot = coverage_mask ? std::optional(*coverage_mask)
+                                 : inputs[1]->GetSnapshot("AdvancedBlend(Src)",
+                                                          renderer, entity);
     if (!src_snapshot.has_value()) {
       if (!dst_snapshot.has_value()) {
         return std::nullopt;
@@ -209,7 +212,7 @@ static std::optional<Entity> AdvancedBlend(
 
     auto options = OptionsFromPass(pass);
     options.primitive_type = PrimitiveType::kTriangleStrip;
-    options.blend_mode = BlendMode::kSrc;
+    options.blend_mode = coverage_mask ? blend_mode : BlendMode::kSrc;
     PipelineRef pipeline = std::invoke(pipeline_proc, renderer, options);
 
 #ifdef IMPELLER_DEBUG
@@ -218,19 +221,24 @@ static std::optional<Entity> AdvancedBlend(
     pass.SetVertexBuffer(std::move(vtx_buffer));
     pass.SetPipeline(pipeline);
 
-    typename FS::BlendInfo blend_info;
+    typename FS::BlendInfo blend_info{};
     typename VS::FrameInfo frame_info;
 
     raw_ptr<const Sampler> dst_sampler =
         renderer.GetContext()->GetSamplerLibrary()->GetSampler(
-            dst_snapshot->sampler_descriptor);
+            coverage_mask ? SamplerDescriptor{}
+                          : dst_snapshot->sampler_descriptor);
     FS::BindTextureSamplerDst(pass, dst_snapshot->texture, dst_sampler);
     blend_info.dst_input_alpha =
         absorb_opacity == ColorFilterContents::AbsorbOpacity::kYes
             ? dst_snapshot->opacity
             : 1.0;
 
-    if (foreground_color.has_value()) {
+    if (coverage_mask) {
+      auto sampler = renderer.GetContext()->GetSamplerLibrary()->GetSampler({});
+      FS::BindTextureSamplerSrc(pass, coverage_mask->texture, sampler);
+      blend_info.color = foreground_color.value();
+    } else if (foreground_color.has_value()) {
       blend_info.color_factor = 1;
       blend_info.color = foreground_color.value();
       // This texture will not be sampled from due to the color factor. But
@@ -262,13 +270,13 @@ static std::optional<Entity> AdvancedBlend(
     return std::nullopt;
   }
   absl::StatusOr<RenderTarget> render_target =
-      renderer.MakeSubpass("Advanced Blend Filter",         //
-                           ISize(render_target_size),       //
-                           command_buffer,                  //
-                           callback,                        //
-                           /*msaa_enabled=*/false,          //
-                           /*depth_stencil_enabled=*/false  //
-      );
+      renderer.MakeSubpass("Advanced Blend Filter",    //
+                           ISize(render_target_size),  //
+                           command_buffer,             //
+                           callback,                   //
+                           /*msaa_enabled=*/false,     //
+                           /*depth_stencil_enabled=*/false,
+                           /*mip_count=*/1, target_format);
   if (!render_target.ok()) {
     return std::nullopt;
   }
@@ -289,6 +297,36 @@ static std::optional<Entity> AdvancedBlend(
                           : dst_snapshot->opacity) *
                      alpha.value_or(1.0)},
       entity.GetBlendMode());
+}
+
+bool BlendFilterContents::RenderCoverageBlend(const ContentContext& renderer,
+                                              const Entity& entity,
+                                              RenderPass& pass,
+                                              const Snapshot& mask,
+                                              std::shared_ptr<Texture> backdrop,
+                                              Color source_color,
+                                              CoverageBlendProgram program) {
+  const auto coverage = mask.GetCoverage();
+  if (!coverage) {
+    return false;
+  }
+  // The mask and backdrop transforms are already in pass space. Write the
+  // final framebuffer color to a separate texture before drawing it back.
+  Entity composite;
+  composite.SetBlendMode(BlendMode::kSrc);
+  auto result = AdvancedBlend<AdvancedBlendPipelineHandle>(
+      {FilterInput::Make(std::move(backdrop))}, renderer, composite, *coverage,
+      entity.GetBlendMode(), source_color,
+      ColorFilterContents::AbsorbOpacity::kYes,
+      [program](const ContentContext& context, ContentContextOptions opts) {
+        return context.GetOffscreenCoverageBlendPipeline(program, opts);
+      },
+      std::nullopt, &mask, pass.GetRenderTargetPixelFormat());
+  if (!result) {
+    return false;
+  }
+  result->SetClipDepth(entity.GetClipDepth());
+  return result->Render(renderer, pass);
 }
 
 std::optional<Entity> BlendFilterContents::CreateForegroundAdvancedBlend(
@@ -381,7 +419,7 @@ std::optional<Entity> BlendFilterContents::CreateForegroundAdvancedBlend(
         return false;
     }
 
-    FS::BlendInfo blend_info;
+    FS::BlendInfo blend_info{};
     VS::FrameInfo frame_info;
 
     raw_ptr<const Sampler> dst_sampler =

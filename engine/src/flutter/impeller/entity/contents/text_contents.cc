@@ -256,7 +256,9 @@ bool TextContents::Render(const ContentContext& renderer,
                           const Entity& entity,
                           RenderPass& pass) const {
   Color color = GetColor();
-  if (color.IsTransparent()) {
+  const auto output = entity.GetCoverageBlendOutput();
+  if (color.IsTransparent() &&
+      output == CoverageBlendOutput::kSourceTimesCoverage) {
     return true;
   }
 
@@ -288,6 +290,7 @@ bool TextContents::Render(const ContentContext& renderer,
 
   FS::FragInfo frag_info;
   frag_info.use_text_color = force_text_color_ ? 1.0 : 0.0;
+  frag_info.coverage_blend_output = static_cast<Scalar>(output);
   frag_info.text_color = ToVector(color.Premultiply());
   frag_info.is_color_glyph = type == GlyphAtlas::Type::kColorBitmap;
   bool enable_gamma_correction = frame_->GetEnableGammaCorrection().value_or(

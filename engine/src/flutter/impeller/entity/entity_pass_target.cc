@@ -38,12 +38,11 @@ std::shared_ptr<Texture> EntityPassTarget::Flip(
   }
 
   if (!secondary_color_texture_) {
-    // The second texture is allocated lazily to avoid unused allocations.
-    TextureDescriptor new_descriptor =
-        color0.resolve_texture->GetTextureDescriptor();
-    RenderTarget target = renderer.GetRenderTargetCache()->CreateOffscreenMSAA(
-        *renderer.GetContext(), new_descriptor.size, 1);
-    secondary_color_texture_ = target.GetRenderTargetTexture();
+    // The resolve pair must use the same format and stay associated with the
+    // same MSAA and depth attachments across render pass restarts.
+    secondary_color_texture_ =
+        renderer.GetContext()->GetResourceAllocator()->CreateTexture(
+            color0.resolve_texture->GetTextureDescriptor());
 
     if (!secondary_color_texture_) {
       return nullptr;

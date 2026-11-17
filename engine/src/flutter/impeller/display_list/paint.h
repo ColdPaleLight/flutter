@@ -116,6 +116,10 @@ struct Paint {
   /// @brief   Whether this paint has a color filter that can apply opacity
   bool HasColorFilter() const;
 
+  // The coverage compositor currently takes a single solid source color.
+  bool UsesCoverageBlend() const;
+  Color FilterColor(Color source) const;
+
   /// @brief      Create a `ColorSourceContents` representing this paint's
   ///             shader/colors.
   /// @param[in]  renderer            The content context renderer.

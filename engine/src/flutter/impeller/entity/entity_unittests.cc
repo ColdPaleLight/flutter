@@ -2168,6 +2168,71 @@ TEST_P(EntityTest, DecalSpecializationAppliedToMorphologyFilter) {
             expected_constants);
 }
 
+TEST(CoverageBlendPlanTest, SrcConfiguresFixedFunctionEquations) {
+  for (const auto alpha : {0.0f, 1.0f}) {
+    SCOPED_TRACE(alpha);
+    const auto plan = ResolveCoverageBlendPlan(BlendMode::kSrc, alpha, true);
+    ASSERT_TRUE(plan);
+    const auto* blend = std::get_if<FixedFunctionCoverageBlend>(&*plan);
+    ASSERT_NE(blend, nullptr);
+    EXPECT_EQ(blend->output, alpha == 0.0f
+                                 ? CoverageBlendOutput::kCoverage
+                                 : CoverageBlendOutput::kSourceTimesCoverage);
+
+    ContentContextOptions opts{.blend_mode = BlendMode::kSrc,
+                               .has_depth_stencil_attachments = false,
+                               .blend_state = blend->blend_state};
+    PipelineDescriptor descriptor;
+    descriptor.SetColorAttachmentDescriptor(0, {});
+    opts.ApplyToPipelineDescriptor(descriptor);
+    const auto color = descriptor.GetColorAttachmentDescriptor(0);
+    ASSERT_TRUE(color);
+    const auto source = alpha == 0.0f ? BlendFactor::kZero : BlendFactor::kOne;
+    EXPECT_TRUE(color->blending_enabled);
+    EXPECT_EQ(color->src_color_blend_factor, source);
+    EXPECT_EQ(color->src_alpha_blend_factor, source);
+    EXPECT_EQ(color->dst_color_blend_factor, BlendFactor::kOneMinusSourceAlpha);
+    EXPECT_EQ(color->dst_alpha_blend_factor, BlendFactor::kOneMinusSourceAlpha);
+    EXPECT_EQ(color->color_blend_op, BlendOperation::kAdd);
+    EXPECT_EQ(color->alpha_blend_op, BlendOperation::kAdd);
+    EXPECT_EQ(opts.blend_mode, BlendMode::kSrc);
+  }
+}
+
+TEST(CoverageBlendPlanTest, SelectsDestinationReadForTranslucentSrc) {
+  using Read = ProgrammableCoverageBlend::DestinationRead;
+  EXPECT_FALSE(ResolveCoverageBlendPlan(BlendMode::kMultiply, 0.5f, true));
+  for (bool fetch : {true, false}) {
+    const auto plan = ResolveCoverageBlendPlan(BlendMode::kSrc, 0.5f, fetch);
+    ASSERT_TRUE(plan);
+    const auto* blend = std::get_if<ProgrammableCoverageBlend>(&*plan);
+    ASSERT_NE(blend, nullptr);
+    EXPECT_EQ(blend->program, CoverageBlendProgram::kSrc);
+    EXPECT_EQ(blend->destination_read,
+              fetch ? Read::kFramebufferFetch : Read::kOffscreen);
+  }
+}
+
+TEST(CoverageBlendPlanTest, PipelineKeyTracksGpuStateWhenExplicit) {
+  ContentContextOptions opts{
+      .blend_mode = BlendMode::kSrc,
+      .blend_state = BlendState::Add(BlendFactor::kOne,
+                                     BlendFactor::kOneMinusSourceAlpha)};
+  const auto key = opts.ToKey();
+  opts.blend_mode = BlendMode::kDst;
+  EXPECT_EQ(key, opts.ToKey());
+  opts.blend_state->color.source = BlendFactor::kZero;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state->color.source = BlendFactor::kOne;
+  opts.blend_state->alpha.destination = BlendFactor::kOne;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state->alpha.destination = BlendFactor::kOneMinusSourceAlpha;
+  opts.blend_state->alpha.operation = BlendOperation::kReverseSubtract;
+  EXPECT_NE(key, opts.ToKey());
+  opts.blend_state.reset();
+  EXPECT_NE(key, opts.ToKey());
+}
+
 // This doesn't really tell you if the hashes will have frequent
 // collisions, but since this type is only used to hash a bounded
 // set of options, we can just compare benchmarks.

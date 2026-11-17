@@ -141,30 +141,32 @@ class ColorSourceContents : public Contents {
         return true;
       }
       pass.SetVertexBuffer(std::move(stencil_geometry_result.vertex_buffer));
-      options.primitive_type = stencil_geometry_result.type;
 
-      options.blend_mode = BlendMode::kDst;
+      auto stencil_options = options;
+      stencil_options.primitive_type = stencil_geometry_result.type;
+      stencil_options.blend_mode = BlendMode::kDst;
+      stencil_options.blend_state.reset();
       switch (stencil_geometry_result.mode) {
         case GeometryResult::Mode::kNonZero:
           pass.SetCommandLabel("Stencil preparation (NonZero)");
-          options.stencil_mode =
+          stencil_options.stencil_mode =
               ContentContextOptions::StencilMode::kStencilNonZeroFill;
           break;
         case GeometryResult::Mode::kEvenOdd:
           pass.SetCommandLabel("Stencil preparation (EvenOdd)");
-          options.stencil_mode =
+          stencil_options.stencil_mode =
               ContentContextOptions::StencilMode::kStencilEvenOddFill;
           break;
         default:
           if (force_stencil) {
             pass.SetCommandLabel("Stencil preparation (NonZero)");
-            options.stencil_mode =
+            stencil_options.stencil_mode =
                 ContentContextOptions::StencilMode::kStencilNonZeroFill;
             break;
           }
           FML_UNREACHABLE();
       }
-      pass.SetPipeline(renderer.GetClipPipeline(options));
+      pass.SetPipeline(renderer.GetClipPipeline(stencil_options));
       ClipPipeline::VertexShader::FrameInfo clip_frame_info;
       clip_frame_info.depth = entity.GetShaderClipDepth();
       clip_frame_info.mvp = stencil_geometry_result.transform;
@@ -178,7 +180,6 @@ class ColorSourceContents : public Contents {
 
       /// Cover draw.
 
-      options.blend_mode = entity.GetBlendMode();
       options.stencil_mode = ContentContextOptions::StencilMode::kCoverCompare;
       std::optional<Rect> maybe_cover_area = geometry->GetCoverage({});
       if (!maybe_cover_area.has_value()) {
@@ -202,10 +203,9 @@ class ColorSourceContents : public Contents {
     pass.SetVertexBuffer(std::move(geometry_result.vertex_buffer));
     options.primitive_type = geometry_result.type;
 
-    // Enable depth writing for all opaque entities in order to allow
-    // reordering. Opaque entities are coerced to source blending by
-    // `EntityPass::AddEntity`.
-    options.depth_write_enabled = options.blend_mode == BlendMode::kSrc;
+    // Allow reordering when the regular color pipeline replaces the fragment.
+    options.depth_write_enabled =
+        !options.blend_state && options.blend_mode == BlendMode::kSrc;
 
     // Take the pre-populated vertex shader uniform struct and set managed
     // values.

@@ -4,6 +4,11 @@
 
 #include "impeller/entity/contents/content_context.h"
 
+#if defined(IMPELLER_ENABLE_VULKAN)
+#include "impeller/entity/framebuffer_blend_single_sample.frag.h"
+#endif
+
+#include <array>
 #include <memory>
 #include <string>
 #include <utility>
@@ -13,6 +18,7 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/texture_descriptor.h"
+#include "impeller/entity/contents/coverage_blend.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
 #include "impeller/entity/contents/pipeline_variant_recording.h"
 #include "impeller/entity/contents/pipelines.h"
@@ -276,6 +282,15 @@ struct ContentContext::Pipelines {
   Variants<LinearGradientSSBOFillPipeline> linear_gradient_ssbo_fill;
   Variants<LinearGradientUniformFillPipeline> linear_gradient_uniform_fill;
   Variants<LinearToSrgbFilterPipeline> linear_to_srgb_filter;
+  std::array<Variants<AdvancedBlendPipelineHandle>,
+             static_cast<size_t>(CoverageBlendProgram::kCount)> offscreen_coverage_blend;
+  std::array<Variants<FramebufferBlendPipelineHandle>,
+             static_cast<size_t>(CoverageBlendProgram::kCount)> framebuffer_coverage_blend;
+#if defined(IMPELLER_ENABLE_VULKAN)
+  std::array<Variants<RenderPipelineHandle<FramebufferBlendVertexShader,
+                                           FramebufferBlendSingleSampleFragmentShader>>,
+             static_cast<size_t>(CoverageBlendProgram::kCount)> framebuffer_coverage_blend_single_sample;
+#endif
   Variants<MorphologyFilterPipeline> morphology_filter;
   Variants<PorterDuffBlendPipeline> porter_duff_blend;
   Variants<RadialGradientFillPipeline> radial_gradient_fill;
@@ -713,6 +728,28 @@ ContentContext::CreateDefaultPipelines(const Context& context) {
         {static_cast<Scalar>(BlendSelectValues::kSoftLight), supports_decal});
   }
 
+  for (size_t i = 0; i < pipelines->offscreen_coverage_blend.size(); ++i) {
+    const std::vector<Scalar> constants = {
+        static_cast<Scalar>(BlendSelectValues::kFirstCoverageBlend) +
+            static_cast<Scalar>(i),
+        supports_decal};
+    pipelines->offscreen_coverage_blend[i].CreateDefault(
+        context, options_no_msaa_no_depth_stencil_src, constants);
+    if (!context.GetCapabilities()->SupportsFramebufferFetch()) {
+      continue;
+    }
+    pipelines->framebuffer_coverage_blend[i].CreateDefault(
+        context, options_framebuffer_blend, constants);
+#if defined(IMPELLER_ENABLE_VULKAN)
+    if (context.GetBackendType() == Context::BackendType::kVulkan) {
+      auto single_sample = options_framebuffer_blend;
+      single_sample.sample_count = SampleCount::kCount1;
+      pipelines->framebuffer_coverage_blend_single_sample[i].CreateDefault(
+          context, single_sample, constants);
+    }
+#endif
+  }
+
   // Morphology filters only draw into a subpass without MSAA or depth/stencil.
   pipelines->morphology_filter.CreateDefault(
       context, options_no_msaa_no_depth_stencil_src, {supports_decal});
@@ -842,7 +879,8 @@ absl::StatusOr<RenderTarget> ContentContext::MakeSubpass(
     const SubpassCallback& subpass_callback,
     bool msaa_enabled,
     bool depth_stencil_enabled,
-    int32_t mip_count) const {
+    int32_t mip_count,
+    std::optional<PixelFormat> color_format) const {
   const std::shared_ptr<Context>& context = GetContext();
   RenderTarget subpass_target;
 
@@ -862,12 +900,13 @@ absl::StatusOr<RenderTarget> ContentContext::MakeSubpass(
         /*existing_color_msaa_texture=*/nullptr,
         /*existing_color_resolve_texture=*/nullptr,
         /*existing_depth_stencil_texture=*/nullptr,
-        /*target_pixel_format=*/std::nullopt);
+        /*target_pixel_format=*/color_format);
   } else {
     subpass_target = GetRenderTargetCache()->CreateOffscreen(
         *context, texture_size,
         /*mip_count=*/mip_count, label,
-        RenderTarget::kDefaultColorAttachmentConfig, depth_stencil_config);
+        RenderTarget::kDefaultColorAttachmentConfig, depth_stencil_config,
+        nullptr, nullptr, color_format);
   }
   return MakeSubpass(label, subpass_target, command_buffer, subpass_callback);
 }
@@ -1231,6 +1270,14 @@ PipelineRef ContentContext::GetBlendSaturationPipeline(
   return GetPipeline(this, pipelines_->blend_saturation, opts);
 }
 
+PipelineRef ContentContext::GetOffscreenCoverageBlendPipeline(
+    CoverageBlendProgram program,
+    ContentContextOptions opts) const {
+  return GetPipeline(
+      this, pipelines_->offscreen_coverage_blend[static_cast<size_t>(program)],
+      opts);
+}
+
 PipelineRef ContentContext::GetBlendScreenPipeline(
     ContentContextOptions opts) const {
   return GetPipeline(this, pipelines_->blend_screen, opts);
@@ -1327,6 +1374,22 @@ PipelineRef ContentContext::GetFramebufferBlendSaturationPipeline(
     ContentContextOptions opts) const {
   FML_DCHECK(GetDeviceCapabilities().SupportsFramebufferFetch());
   return GetPipeline(this, pipelines_->framebuffer_blend_saturation, opts);
+}
+
+PipelineRef ContentContext::GetFramebufferCoverageBlendPipeline(
+    CoverageBlendProgram program,
+    ContentContextOptions opts) const {
+  FML_DCHECK(GetDeviceCapabilities().SupportsFramebufferFetch());
+  const auto index = static_cast<size_t>(program);
+#if defined(IMPELLER_ENABLE_VULKAN)
+  if (context_->GetBackendType() == Context::BackendType::kVulkan &&
+      opts.sample_count == SampleCount::kCount1) {
+    return GetPipeline(
+        this, pipelines_->framebuffer_coverage_blend_single_sample[index],
+        opts);
+  }
+#endif
+  return GetPipeline(this, pipelines_->framebuffer_coverage_blend[index], opts);
 }
 
 PipelineRef ContentContext::GetFramebufferBlendScreenPipeline(

@@ -97,8 +97,9 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
     bool is_msaa =
         pass_target_.GetRenderTarget().GetColorAttachment(0).resolve_texture !=
         nullptr;
-    if (pass_count_ > 0 && is_msaa) {
-      pass_target_.Flip(renderer_);
+    if (pass_count_ > 0 && is_msaa && !pass_target_.Flip(renderer_)) {
+      VALIDATION_LOG << "Could not prepare a second resolve texture.";
+      return pass_;
     }
   }
 

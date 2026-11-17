@@ -15,12 +15,14 @@ uniform FragInfo {
   float use_text_color;
   f16vec4 text_color;
   float text_contrast;
+  float coverage_blend_output;
 }
 frag_info;
 
 in highp vec2 v_uv;
 
-out f16vec4 frag_color;
+#define COVERAGE_COLOR_TYPE f16vec4
+#include "coverage_output.glsl"
 
 void main() {
   f16vec4 value = texture(glyph_atlas_sampler, v_uv);
@@ -46,6 +48,7 @@ void main() {
       coverage = 1.0 - pow(1.0 - coverage, frag_info.text_contrast);
     }
 
-    frag_color = f16vec4(coverage) * frag_info.text_color;
+    WriteCoverageBlendOutput(frag_info.text_color, coverage,
+                             frag_info.coverage_blend_output);
   }
 }

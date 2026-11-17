@@ -32,17 +32,30 @@ std::optional<Rect> FramebufferBlendContents::GetCoverage(
   return child_contents_->GetCoverage(entity);
 }
 
+static void SetSnapshotGeometry(const ContentContext& renderer,
+                                RenderPass& pass,
+                                const Snapshot& snapshot) {
+  using VS = FramebufferBlendPipelineHandle::VertexShader;
+  auto size = snapshot.texture->GetSize();
+
+  std::array<VS::PerVertexData, 4> vertices = {
+      VS::PerVertexData{Point(0, 0), Point(0, 0)},
+      VS::PerVertexData{Point(size.width, 0), Point(1, 0)},
+      VS::PerVertexData{Point(0, size.height), Point(0, 1)},
+      VS::PerVertexData{Point(size.width, size.height), Point(1, 1)},
+  };
+
+  pass.SetCommandLabel("Framebuffer Advanced Blend Filter");
+  pass.SetVertexBuffer(
+      CreateVertexBuffer(vertices, renderer.GetTransientsDataBuffer()));
+}
+
 bool FramebufferBlendContents::Render(const ContentContext& renderer,
                                       const Entity& entity,
                                       RenderPass& pass) const {
   if (!renderer.GetDeviceCapabilities().SupportsFramebufferFetch()) {
     return false;
   }
-
-  using VS = FramebufferBlendScreenPipeline::VertexShader;
-  using FS = FramebufferBlendScreenPipeline::FragmentShader;
-
-  auto& data_host_buffer = renderer.GetTransientsDataBuffer();
 
   auto src_snapshot = child_contents_->RenderToSnapshot(
       renderer, entity,
@@ -56,22 +69,11 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
     return true;
   }
 
-  auto size = src_snapshot->texture->GetSize();
-
-  std::array<VS::PerVertexData, 4> vertices = {
-      VS::PerVertexData{Point(0, 0), Point(0, 0)},
-      VS::PerVertexData{Point(size.width, 0), Point(1, 0)},
-      VS::PerVertexData{Point(0, size.height), Point(0, 1)},
-      VS::PerVertexData{Point(size.width, size.height), Point(1, 1)},
-  };
-
   auto options = OptionsFromPass(pass);
   options.blend_state = {};
   options.primitive_type = PrimitiveType::kTriangleStrip;
 
-  pass.SetCommandLabel("Framebuffer Advanced Blend Filter");
-  pass.SetVertexBuffer(
-      CreateVertexBuffer(vertices, renderer.GetTransientsDataBuffer()));
+  SetSnapshotGeometry(renderer, pass, *src_snapshot);
 
   switch (blend_mode_) {
     case BlendMode::kScreen:
@@ -123,10 +125,45 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
       return false;
   }
 
+  return DrawSnapshot(renderer, entity, pass, *src_snapshot);
+}
+
+bool FramebufferBlendContents::RenderCoverageBlend(
+    const ContentContext& renderer,
+    const Entity& entity,
+    RenderPass& pass,
+    const Snapshot& mask,
+    Color source_color,
+    CoverageBlendProgram program) {
+  auto options = OptionsFromPass(pass);
+  options.blend_state = {};
+  options.primitive_type = PrimitiveType::kTriangleStrip;
+  auto pipeline =
+      renderer.GetFramebufferCoverageBlendPipeline(program, options);
+  if (!pipeline) {
+    return false;
+  }
+
+  SetSnapshotGeometry(renderer, pass, mask);
+  pass.SetPipeline(pipeline);
+  return DrawSnapshot(renderer, entity, pass, mask, source_color);
+}
+
+bool FramebufferBlendContents::DrawSnapshot(
+    const ContentContext& renderer,
+    const Entity& entity,
+    RenderPass& pass,
+    const Snapshot& src_snapshot,
+    std::optional<Color> coverage_source_color) {
+  using VS = FramebufferBlendPipelineHandle::VertexShader;
+  using FS = FramebufferBlendPipelineHandle::FragmentShader;
+
+  auto& data_host_buffer = renderer.GetTransientsDataBuffer();
+
   VS::FrameInfo frame_info;
   FS::FragInfo frag_info{};
 
-  auto src_sampler_descriptor = src_snapshot->sampler_descriptor;
+  auto src_sampler_descriptor = src_snapshot.sampler_descriptor;
   if (renderer.GetDeviceCapabilities().SupportsDecalSamplerAddressMode()) {
     src_sampler_descriptor.width_address_mode = SamplerAddressMode::kDecal;
     src_sampler_descriptor.height_address_mode = SamplerAddressMode::kDecal;
@@ -134,14 +171,18 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
   raw_ptr<const Sampler> src_sampler =
       renderer.GetContext()->GetSamplerLibrary()->GetSampler(
           src_sampler_descriptor);
-  FS::BindTextureSamplerSrc(pass, src_snapshot->texture, src_sampler);
+  FS::BindTextureSamplerSrc(pass, src_snapshot.texture, src_sampler);
 
   frame_info.mvp = Entity::GetShaderTransform(entity.GetShaderClipDepth(), pass,
-                                              src_snapshot->transform);
+                                              src_snapshot.transform);
   VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
-  frag_info.src_input_alpha = src_snapshot->opacity;
+  frag_info.src_input_alpha = src_snapshot.opacity;
   frag_info.dst_input_alpha = 1.0;
+  if (coverage_source_color) {
+    frag_info.coverage_source_color =
+        ToVector(coverage_source_color->Premultiply());
+  }
   FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
 
   return pass.Draw().ok();

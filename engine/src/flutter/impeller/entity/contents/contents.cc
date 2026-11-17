@@ -34,7 +34,11 @@ ContentContextOptions OptionsFromPass(const RenderPass& pass) {
 ContentContextOptions OptionsFromPassAndEntity(const RenderPass& pass,
                                                const Entity& entity) {
   ContentContextOptions opts = OptionsFromPass(pass);
-  opts.blend_state = BlendState::FromBlendMode(entity.GetBlendMode());
+  if (const auto& blend = entity.GetCoverageBlend()) {
+    opts.blend_state = blend->blend_state;
+  } else {
+    opts.blend_state = BlendState::FromBlendMode(entity.GetBlendMode());
+  }
   return opts;
 }
 
@@ -81,13 +85,27 @@ std::optional<Snapshot> Contents::RenderToSnapshot(
     }
   }
 
+  if (options.coverage_only) {
+    // Keep the mask on the destination's pixel grid, including in offset
+    // layers.
+    const auto pixels = IRect::RoundOut(*coverage);
+    coverage = Rect::MakeLTRB(pixels.GetLeft(), pixels.GetTop(),
+                              pixels.GetRight(), pixels.GetBottom());
+  }
   ISize subpass_size = ISize::Ceil(coverage->GetSize());
   absl::StatusOr<RenderTarget> render_target = renderer.MakeSubpass(
       options.label, subpass_size, command_buffer,
-      [&contents = *this, &entity, &coverage](const ContentContext& renderer,
-                                              RenderPass& pass) -> bool {
+      [&contents = *this, &entity, &coverage, &options](
+          const ContentContext& renderer, RenderPass& pass) -> bool {
         Entity sub_entity;
         sub_entity.SetBlendMode(BlendMode::kSrcOver);
+        if (options.coverage_only) {
+          // Accumulate the union of covered fragments in the mask.
+          sub_entity.SetCoverageBlend(
+              {BlendState::Add(BlendFactor::kOne,
+                               BlendFactor::kOneMinusSourceAlpha),
+               CoverageBlendOutput::kCoverage});
+        }
         sub_entity.SetTransform(
             Matrix::MakeTranslation(Vector3(-coverage->GetOrigin())) *
             entity.GetTransform());
@@ -95,7 +113,9 @@ std::optional<Snapshot> Contents::RenderToSnapshot(
       },
       options.msaa_enabled, /*depth_stencil_enabled=*/true,
       std::min(options.mip_count,
-               static_cast<int32_t>(subpass_size.MipCount())));
+               static_cast<int32_t>(subpass_size.MipCount())),
+      options.coverage_only ? std::optional(PixelFormat::kR8G8B8A8UNormInt)
+                            : std::nullopt);
 
   if (!render_target.ok()) {
     return std::nullopt;

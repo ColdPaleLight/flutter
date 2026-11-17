@@ -28,6 +28,9 @@
 #include "third_party/abseil-cpp/absl/status/statusor.h"
 
 namespace impeller {
+
+enum class CoverageBlendProgram : uint8_t;
+
 /// Pipeline state configuration.
 ///
 /// Each unique combination of these options requires a different pipeline state
@@ -164,6 +167,8 @@ class ContentContext {
   PipelineRef GetBlendSaturationPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendSoftLightPipeline(ContentContextOptions opts) const;
+  PipelineRef GetOffscreenCoverageBlendPipeline(CoverageBlendProgram program,
+                                                ContentContextOptions opts) const;
   PipelineRef GetCirclePipeline(ContentContextOptions opts) const;
   PipelineRef GetClipPipeline(ContentContextOptions opts) const;
   PipelineRef GetColorMatrixColorFilterPipeline(ContentContextOptions opts) const;
@@ -188,6 +193,9 @@ class ContentContext {
   PipelineRef GetFramebufferBlendMultiplyPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendOverlayPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendSaturationPipeline(ContentContextOptions opts) const;
+  PipelineRef GetFramebufferCoverageBlendPipeline(CoverageBlendProgram program,
+                                                  ContentContextOptions opts) const;
+
   PipelineRef GetFramebufferBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetFramebufferBlendSoftLightPipeline(ContentContextOptions opts) const;
   PipelineRef GetGaussianBlurPipeline(ContentContextOptions opts) const;
@@ -244,7 +252,8 @@ class ContentContext {
       const SubpassCallback& subpass_callback,
       bool msaa_enabled = true,
       bool depth_stencil_enabled = false,
-      int32_t mip_count = 1) const;
+      int32_t mip_count = 1,
+      std::optional<PixelFormat> color_format = std::nullopt) const;
 
   /// Makes a subpass that will render to `subpass_target`.
   absl::StatusOr<RenderTarget> MakeSubpass(

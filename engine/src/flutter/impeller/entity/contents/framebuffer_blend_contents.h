@@ -28,6 +28,7 @@ enum class BlendSelectValues {
   kSaturation,
   kColor,
   kLuminosity,
+  kFirstCoverageBlend,  // Also defined in coverage_composite.glsl.
 };
 
 class FramebufferBlendContents final : public ColorSourceContents {
@@ -42,6 +43,14 @@ class FramebufferBlendContents final : public ColorSourceContents {
 
   void SetChildContents(std::shared_ptr<Contents> child_contents);
 
+  // Uses the mask as the source texture and the solid color as the source ink.
+  static bool RenderCoverageBlend(const ContentContext& renderer,
+                                  const Entity& entity,
+                                  RenderPass& pass,
+                                  const Snapshot& mask,
+                                  Color source_color,
+                                  CoverageBlendProgram program);
+
  private:
   // |Contents|
   std::optional<Rect> GetCoverage(const Entity& entity) const override;
@@ -50,6 +59,13 @@ class FramebufferBlendContents final : public ColorSourceContents {
   bool Render(const ContentContext& renderer,
               const Entity& entity,
               RenderPass& pass) const override;
+
+  static bool DrawSnapshot(
+      const ContentContext& renderer,
+      const Entity& entity,
+      RenderPass& pass,
+      const Snapshot& src_snapshot,
+      std::optional<Color> coverage_source_color = std::nullopt);
 
   BlendMode blend_mode_ = BlendMode::kSrcOver;
   std::shared_ptr<Contents> child_contents_;

@@ -9,6 +9,7 @@
 #include <impeller/texture.glsl>
 #include <impeller/types.glsl>
 #include "blend_select.glsl"
+#include "coverage_composite.glsl"
 
 // Warning: if any of the constant values or layouts are changed in this
 // file, then the hard-coded constant value in
@@ -16,10 +17,16 @@
 layout(constant_id = 0) const float blend_type = 0;
 layout(constant_id = 1) const float supports_decal = 1;
 
+#if defined(IMPELLER_TARGET_VULKAN) && defined(FRAMEBUFFER_BLEND_SINGLE_SAMPLE)
+layout(input_attachment_index = 0) uniform subpassInput uSub;
+#else
 layout(input_attachment_index = 0) uniform subpassInputMS uSub;
+#endif
 
 vec4 ReadDestination() {
-#ifdef IMPELLER_TARGET_VULKAN
+#if defined(IMPELLER_TARGET_VULKAN) && defined(FRAMEBUFFER_BLEND_SINGLE_SAMPLE)
+  return subpassLoad(uSub);
+#elif defined(IMPELLER_TARGET_VULKAN)
   // Vulkan reads MSAA input attachments one sample at a time, and this shader
   // runs once per pixel. Average only the samples covered by this primitive.
   // Samples outside its coverage may already have been written earlier in
@@ -46,6 +53,7 @@ uniform sampler2D texture_sampler_src;
 uniform FragInfo {
   float16_t src_input_alpha;
   float16_t dst_input_alpha;
+  vec4 coverage_source_color;
 }
 frag_info;
 
@@ -61,6 +69,16 @@ vec4 Sample(sampler2D texture_sampler, vec2 texture_coords) {
 }
 
 void main() {
+  if (blend_type >= kFirstCoverageBlend) {
+    float coverage = Sample(texture_sampler_src, v_src_texture_coords).a;
+    if (coverage == 0.0) {
+      discard;
+    }
+    frag_color =
+        CompositeCoverageBlend(blend_type, ReadDestination(),
+                               frag_info.coverage_source_color, coverage);
+    return;
+  }
   f16vec4 dst = IPHalfUnpremultiply(f16vec4(ReadDestination()));
   dst.a *= frag_info.dst_input_alpha;
   f16vec4 src = IPHalfUnpremultiply(

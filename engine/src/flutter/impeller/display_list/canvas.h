@@ -138,7 +138,8 @@ class Canvas {
                   const RenderTarget& render_target,
                   bool is_onscreen,
                   bool requires_readback,
-                  IRect32 cull_rect);
+                  IRect32 cull_rect,
+                  bool requires_coverage_readback = false);
 
   ~Canvas() = default;
 
@@ -257,7 +258,7 @@ class Canvas {
                     Entity::ClipOperation clip_op,
                     bool is_aa = true);
 
-  void EndReplay();
+  bool EndReplay();
 
   uint64_t GetOpDepth() const { return current_depth_; }
 
@@ -285,6 +286,8 @@ class Canvas {
   /// are generated.
   bool EnsureFinalMipmapGeneration() const;
 
+  static bool CanDrawOvalAsCircle(const Rect& rect, const Paint& paint);
+
   /// Returns true if the paint is compatible with SDF rendering.
   ///
   static bool IsCompatibleWithSDFRendering(const Paint& paint,
@@ -307,6 +310,8 @@ class Canvas {
   RenderTarget render_target_;
   const bool is_onscreen_;
   bool requires_readback_;
+  const bool requires_coverage_readback_ = false;
+  bool coverage_blend_failed_ = false;
   EntityPassClipStack clip_coverage_stack_;
 
   std::deque<CanvasStackEntry> transform_stack_;
@@ -405,6 +410,9 @@ class Canvas {
       const std::optional<Matrix>& shape_transform = std::nullopt);
 
   void AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth = false);
+  bool RenderCoverageBlend(const Entity& entity,
+                           Color source_color,
+                           const ProgrammableBlend& blend);
 
   /// Returns true if this operation is consistent with a DrawShadow-like
   /// operation.

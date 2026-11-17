@@ -203,10 +203,9 @@ class ColorSourceContents : public Contents {
     pass.SetVertexBuffer(std::move(geometry_result.vertex_buffer));
     options.primitive_type = geometry_result.type;
 
-    // Enable depth writing for all opaque entities in order to allow
-    // reordering. Opaque entities are coerced to source blending by
-    // `EntityPass::AddEntity`.
-    options.depth_write_enabled = entity.GetBlendMode() == BlendMode::kSrc;
+    // Allow reordering when the regular color pipeline replaces the fragment.
+    options.depth_write_enabled =
+        !entity.GetCoverageBlend() && entity.GetBlendMode() == BlendMode::kSrc;
 
     // Take the pre-populated vertex shader uniform struct and set managed
     // values.

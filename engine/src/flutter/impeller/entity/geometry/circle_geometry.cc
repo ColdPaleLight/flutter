@@ -89,8 +89,11 @@ std::optional<Rect> CircleGeometry::GetCoverage(const Matrix& transform) const {
   Scalar max_basis = transform.GetMaxBasisLengthXY();
   Scalar expansion = max_basis == 0 ? 0.0 : padding_pixels_ / max_basis;
 
-  Scalar half_width = stroke_width_ < 0 ? 0.0 : stroke_width_ * 0.5f;
-  Scalar outer_radius = radius_ + half_width + expansion;
+  // Match the minimum stroke width used to generate the circle vertices.
+  Scalar half_width = stroke_width_ < 0 ? 0.0f
+                                        : LineGeometry::ComputePixelHalfWidth(
+                                              transform, stroke_width_);
+  Scalar outer_radius = radius_ + (half_width + expansion);
   return Rect::MakeCircleBounds(center_, outer_radius)
       .TransformAndClipBounds(transform);
 }

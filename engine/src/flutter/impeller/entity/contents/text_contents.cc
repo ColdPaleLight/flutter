@@ -4,6 +4,7 @@
 
 #include "impeller/entity/contents/text_contents.h"
 
+#include <algorithm>
 #include <cstring>
 #include <optional>
 #include <utility>
@@ -13,6 +14,7 @@
 #include "impeller/core/sampler_descriptor.h"
 #include "impeller/entity/entity.h"
 #include "impeller/geometry/color.h"
+#include "impeller/geometry/constants.h"
 #include "impeller/geometry/point.h"
 #include "impeller/renderer/render_pass.h"
 #include "impeller/typographer/glyph_atlas.h"
@@ -86,7 +88,18 @@ void TextContents::SetForceTextColor(bool value) {
 }
 
 std::optional<Rect> TextContents::GetCoverage(const Entity& entity) const {
-  return frame_->GetBounds().TransformBounds(entity.GetTransform());
+  auto bounds = frame_->GetBounds();
+  if (uses_glyph_coverage_for_blend_ && properties_.stroke &&
+      !bounds.IsEmpty()) {
+    // Coverage snapshots must include the stroke rasterized into the atlas.
+    const auto& stroke = *properties_.stroke;
+    Scalar multiplier = stroke.cap == Cap::kSquare ? kSqrt2 : 1.0f;
+    if (stroke.join == Join::kMiter) {
+      multiplier = std::max(multiplier, stroke.miter_limit);
+    }
+    bounds = bounds.Expand(stroke.width * 0.5f * multiplier);
+  }
+  return bounds.TransformBounds(entity.GetTransform());
 }
 
 void TextContents::SetTextProperties(
@@ -256,7 +269,9 @@ bool TextContents::Render(const ContentContext& renderer,
                           const Entity& entity,
                           RenderPass& pass) const {
   Color color = GetColor();
-  if (color.IsTransparent()) {
+  const auto output = entity.GetCoverageBlendOutput();
+  if (color.IsTransparent() &&
+      output == CoverageBlendOutput::kSourceTimesCoverage) {
     return true;
   }
 
@@ -288,6 +303,7 @@ bool TextContents::Render(const ContentContext& renderer,
 
   FS::FragInfo frag_info;
   frag_info.use_text_color = force_text_color_ ? 1.0 : 0.0;
+  frag_info.coverage_blend_output = static_cast<Scalar>(output);
   frag_info.text_color = ToVector(color.Premultiply());
   frag_info.is_color_glyph = type == GlyphAtlas::Type::kColorBitmap;
   bool enable_gamma_correction = frame_->GetEnableGammaCorrection().value_or(

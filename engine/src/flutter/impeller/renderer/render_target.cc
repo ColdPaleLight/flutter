@@ -432,6 +432,7 @@ RenderTarget RenderTargetAllocator::CreateOffscreenMSAA(
     if (context.GetCapabilities()->SupportsImplicitResolvingMSAA()) {
       // See below ("SupportsImplicitResolvingMSAA") for more details.
       color0_tex_desc.storage_mode = StorageMode::kDevicePrivate;
+      color0_tex_desc.usage |= TextureUsage::kShaderRead;
     }
     color0_msaa_tex = allocator_->CreateTexture(color0_tex_desc);
     if (!color0_msaa_tex) {

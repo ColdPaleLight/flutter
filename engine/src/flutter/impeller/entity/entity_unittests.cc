@@ -2168,6 +2168,95 @@ TEST_P(EntityTest, DecalSpecializationAppliedToMorphologyFilter) {
             expected_constants);
 }
 
+TEST(BlendPlanTest, SrcWithoutCoverageWritesSource) {
+  for (bool source_is_opaque : {false, true}) {
+    SCOPED_TRACE(source_is_opaque);
+    const auto plan = ResolveBlendPlan(BlendMode::kSrc, source_is_opaque,
+                                       FragmentCoverage::kNone, {});
+    const auto* blend = std::get_if<FixedFunctionBlend>(&plan);
+    ASSERT_NE(blend, nullptr);
+    EXPECT_EQ(blend->output, CoverageBlendOutput::kSource);
+    EXPECT_EQ(blend->blend_state.ToKey(), BlendState{}.ToKey());
+  }
+
+  ContentContextOptions opts{.blend_state = {},
+                             .has_depth_stencil_attachments = false};
+  PipelineDescriptor descriptor;
+  ColorAttachmentDescriptor initial;
+  initial.blending_enabled = true;
+  initial.write_mask = ColorWriteMaskBits::kNone;
+  descriptor.SetColorAttachmentDescriptor(0, initial);
+  opts.ApplyToPipelineDescriptor(descriptor);
+  const auto color = descriptor.GetColorAttachmentDescriptor(0);
+  ASSERT_TRUE(color);
+  EXPECT_FALSE(color->blending_enabled);
+  EXPECT_EQ(color->write_mask, ColorWriteMaskBits::kAll);
+}
+
+TEST(BlendPlanTest, OpaqueSrcWithCoverageConfiguresFixedFunctionEquations) {
+  const auto plan =
+      ResolveBlendPlan(BlendMode::kSrc, /*source_is_opaque=*/true,
+                       FragmentCoverage::kScalar, {.framebuffer_fetch = true});
+  const auto* blend = std::get_if<FixedFunctionBlend>(&plan);
+  ASSERT_NE(blend, nullptr);
+  EXPECT_EQ(blend->output, CoverageBlendOutput::kSourceTimesCoverage);
+
+  ContentContextOptions opts{.blend_state = blend->blend_state,
+                             .has_depth_stencil_attachments = false};
+  PipelineDescriptor descriptor;
+  descriptor.SetColorAttachmentDescriptor(0, {});
+  opts.ApplyToPipelineDescriptor(descriptor);
+  const auto color = descriptor.GetColorAttachmentDescriptor(0);
+  ASSERT_TRUE(color);
+  EXPECT_TRUE(color->blending_enabled);
+  EXPECT_EQ(color->src_color_blend_factor, BlendFactor::kOne);
+  EXPECT_EQ(color->src_alpha_blend_factor, BlendFactor::kOne);
+  EXPECT_EQ(color->dst_color_blend_factor, BlendFactor::kOneMinusSourceAlpha);
+  EXPECT_EQ(color->dst_alpha_blend_factor, BlendFactor::kOneMinusSourceAlpha);
+  EXPECT_EQ(color->color_blend_op, BlendOperation::kAdd);
+  EXPECT_EQ(color->alpha_blend_op, BlendOperation::kAdd);
+}
+
+TEST(BlendPlanTest, NonOpaqueSrcWithCoverageReadsDestination) {
+  using Read = ProgrammableBlend::DestinationRead;
+  for (bool fetch : {true, false}) {
+    SCOPED_TRACE(fetch);
+    const auto plan = ResolveBlendPlan(
+        BlendMode::kSrc, /*source_is_opaque=*/false, FragmentCoverage::kScalar,
+        {.framebuffer_fetch = fetch});
+    const auto* blend = std::get_if<ProgrammableBlend>(&plan);
+    ASSERT_NE(blend, nullptr);
+    EXPECT_EQ(blend->program, CoverageBlendProgram::kSrc);
+    EXPECT_EQ(blend->destination_read,
+              fetch ? Read::kFramebufferFetch : Read::kOffscreen);
+  }
+}
+
+TEST_P(EntityTest, OpaqueSrcWithCoverageReusesSrcOverPipeline) {
+  const auto plan = ResolveBlendPlan(BlendMode::kSrc, /*source_is_opaque=*/true,
+                                     FragmentCoverage::kScalar, {});
+  const auto* blend = std::get_if<FixedFunctionBlend>(&plan);
+  ASSERT_NE(blend, nullptr);
+
+  ContentContext& context = GetContentContext();
+  ContentContextOptions src_over{
+      .blend_state = BlendState::FromBlendMode(BlendMode::kSrcOver),
+      .color_attachment_pixel_format =
+          GetContext()->GetCapabilities()->GetDefaultColorFormat()};
+  auto src = src_over;
+  src.blend_state = blend->blend_state;
+  EXPECT_EQ(src_over.ToKey(), src.ToKey());
+
+  const auto glyph = context.GetGlyphAtlasPipeline(src_over);
+  ASSERT_TRUE(glyph);
+  EXPECT_EQ(glyph, context.GetGlyphAtlasPipeline(src));
+
+  src.primitive_type = src_over.primitive_type = PrimitiveType::kTriangleStrip;
+  const auto circle = context.GetCirclePipeline(src_over);
+  ASSERT_TRUE(circle);
+  EXPECT_EQ(circle, context.GetCirclePipeline(src));
+}
+
 TEST(BlendStateTest, PipelineKeyTracksGpuBlendState) {
   ContentContextOptions opts;
   const auto key = opts.ToKey();
